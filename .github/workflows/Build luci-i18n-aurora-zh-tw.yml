@@ -6,7 +6,7 @@ on:
       sdk_url:
         description: 'OpenWrt SDK URL (留空則使用預設值)'
         required: false
-        default: ''
+        default: 'https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
 
 jobs:
   build:
@@ -14,7 +14,7 @@ jobs:
     env:
       # === 設定區域 ===
       # 預設 SDK: 這裡保留您原本的 Rockchip 連結，若需編譯 x86 或其他路由請更換此處
-      DEFAULT_SDK_URL: https://downloads.openwrt.org/releases/23.05.5/targets/rockchip/armv8/openwrt-sdk-23.05.5-rockchip-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+      DEFAULT_SDK_URL: https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst
       # 目標插件 Git 網址
       PKG_URL: https://github.com/eamonxg/luci-app-aurora-config.git
       # 插件資料夾名稱 (通常與 Git 倉庫名一致)
