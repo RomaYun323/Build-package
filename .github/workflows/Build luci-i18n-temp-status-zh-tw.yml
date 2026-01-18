@@ -193,4 +193,15 @@ jobs:
           if [[ "$SDK_URL" == *"snapshots"* ]]; then
             OP_VERSION="SNAPSHOT"
           elif [[ "$SDK_URL" == *"releases"* ]]; then
-            # 修正：支援 rc/
+            # 修正：支援 rc/alpha 等非純數字版本號
+            OP_VERSION=$(echo "$SDK_URL" | grep -oP 'releases/\K[^/]+(?=/targets)')
+          else
+            OP_VERSION="Custom"
+          fi
+          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
+
+      - name: 上傳成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
+          path: output/*
