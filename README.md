@@ -1,8 +1,6 @@
 # FriendlyARM NanoPi R4S  
 個人使用插件清單
 
-| 插件名稱  | 網址 | 備註 |
-| ------------- | ------------- |
 ## luci-theme-aurora
 https://github.com/eamonxg/luci-theme-aurora
 
