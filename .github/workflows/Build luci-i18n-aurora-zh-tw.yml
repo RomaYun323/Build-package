@@ -23,7 +23,6 @@ jobs:
       - name: 安裝編譯依賴與 OpenCC
         run: |
           sudo apt-get update
-          # 新增 opencc 用於繁簡轉換
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
             python3-distutils rsync unzip zlib1g-dev file wget zstd \
@@ -59,7 +58,6 @@ jobs:
 
           PO_DIR="po"
           
-          # 如果沒有 po 目錄，直接結束
           if [ ! -d "$PO_DIR" ]; then
             echo "警告：未找到 po 目錄，跳過翻譯處理。"
             exit 0
@@ -72,12 +70,8 @@ jobs:
           fi
 
           # --- 步驟 2: 檢測繁體中文是否存在 ---
-          if [ -d "$PO_DIR/zh_Hant" ]; then
-            echo "檢測到已存在 zh_Hant 目錄，跳過轉換。"
-            exit 0
-          fi
-          if [ -d "$PO_DIR/zh-tw" ]; then
-            echo "檢測到已存在 zh-tw 目錄，跳過轉換。"
+          if [ -d "$PO_DIR/zh_Hant" ] || [ -d "$PO_DIR/zh-tw" ]; then
+            echo "檢測到已存在繁體中文目錄，跳過轉換。"
             exit 0
           fi
 
@@ -99,17 +93,16 @@ jobs:
               sed -i 's/zh_CN/zh_Hant/g'   "$PO_DIR/zh_Hant/$filename"
               sed -i 's/zh-cn/zh_Hant/g'   "$PO_DIR/zh_Hant/$filename"
               
-              # C. 術語修正 (OpenWrt/LuCI 常見用語)
+              # C. 術語修正
               sed -i 's/配置文件/設定檔/g' "$PO_DIR/zh_Hant/$filename"
               sed -i 's/配置/設定/g'      "$PO_DIR/zh_Hant/$filename"
               sed -i 's/保存/儲存/g'      "$PO_DIR/zh_Hant/$filename"
               sed -i 's/应用/套用/g'      "$PO_DIR/zh_Hant/$filename"
               sed -i 's/启用/啟用/g'      "$PO_DIR/zh_Hant/$filename"
             done
-
             echo "轉換完成！"
           else
-            echo "警告：同時找不到繁體目標與簡體來源 (zh_Hans)，無法轉換。"
+            echo "警告：找不到 zh_Hans 來源，無法轉換。"
           fi
 
       - name: 更新並安裝 Feeds
@@ -122,10 +115,8 @@ jobs:
         working-directory: ./sdk
         run: |
           make defconfig
-          
           echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
           make defconfig
-          
           grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
           
           echo "開始編譯 $PACKAGE_NAME ..."
@@ -135,24 +126,37 @@ jobs:
         run: |
           mkdir -p output
           
+          echo "Package Name defined as: $PACKAGE_NAME"
+          
           # 遍歷 sdk/bin 下所有符合條件的 ipk 與 apk 文件
           find sdk/bin -type f -name "*aurora-config*" \( -name "*.ipk" -o -name "*.apk" \) | while read -r filepath; do
             filename=$(basename "$filepath")
             ext="${filename##*.}"
             
-            if [[ "$ext" == "ipk" ]]; then
-              # IPK 規則: name_version_arch.ipk -> name_0_arch.ipk
-              # 例如: luci-i18n-aurora-config-en_25.198..._all.ipk -> luci-i18n-aurora-config-en_0_all.ipk
-              new_filename=$(echo "$filename" | sed -E 's/^(.*)_([^_]+)_([^_]+\.ipk)$/\1_0_\3/')
+            # --- 判斷邏輯開始 ---
+            # 檢查檔名開頭是否完全匹配 PACKAGE_NAME (加上分隔符 _ 或 - 以確保精確匹配)
+            if [[ "$filename" == "$PACKAGE_NAME"_* ]] || [[ "$filename" == "$PACKAGE_NAME"-* ]]; then
               
-            elif [[ "$ext" == "apk" ]]; then
-              # APK 規則: name-version.apk -> name-0.apk
-              # 例如: luci-i18n-aurora-config-en-25.198....apk -> luci-i18n-aurora-config-en-0.apk
-              new_filename=$(echo "$filename" | sed -E 's/^(.*)-([^-]+)\.apk$/\1-0.apk/')
+              # 情況 A：本體插件 -> 直接複製，不改名
+              echo "保留本體原名: $filename"
+              cp "$filepath" "output/$filename"
+              
+            else
+              
+              # 情況 B：附屬包 (如 i18n, l10n) -> 修改版本號為 0
+              if [[ "$ext" == "ipk" ]]; then
+                # IPK: name_version_arch.ipk -> name_0_arch.ipk
+                new_filename=$(echo "$filename" | sed -E 's/^(.*)_([^_]+)_([^_]+\.ipk)$/\1_0_\3/')
+              elif [[ "$ext" == "apk" ]]; then
+                # APK: name-version.apk -> name-0.apk
+                new_filename=$(echo "$filename" | sed -E 's/^(.*)-([^-]+)\.apk$/\1-0.apk/')
+              fi
+              
+              echo "重命名並複製: $filename -> $new_filename"
+              cp "$filepath" "output/$new_filename"
             fi
+            # --- 判斷邏輯結束 ---
             
-            echo "複製並重命名: $filename -> $new_filename"
-            cp "$filepath" "output/$new_filename"
           done
           
           echo "--- 輸出目錄最終內容 ---"
