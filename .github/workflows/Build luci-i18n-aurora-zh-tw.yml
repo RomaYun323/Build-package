@@ -1,132 +1,109 @@
-name: Build luci-i18n-aurora-zh-tw
+name: Build luci-app-aurora-config
 
 on:
   workflow_dispatch:
     inputs:
       sdk_url:
-        description: 'OpenWrt SDK URL'
-        required: false
-        default: 'https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+        description: 'OpenWrt SDK 下載地址 (.tar.zst)'
+        required: true
+        default: 'https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+
+env:
+  PLUGIN_REPO: "https://github.com/eamonxg/luci-app-aurora-config.git"
+  PACKAGE_NAME: "luci-app-aurora-config"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    env:
-      DEFAULT_SDK_URL: https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-      PKG_URL: https://github.com/eamonxg/luci-app-aurora-config.git
-      PKG_NAME: luci-app-aurora-config
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: 初始化環境
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: 安裝編譯依賴
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 file opencc zstd python3-pyelftools python3-setuptools
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget zstd \
+            ccache ecj fastjar libelf-dev xsltproc python3-pyelftools
 
-      - name: Download and Setup SDK
+      - name: 下載並解壓 SDK
         run: |
-          SDK_LINK="${{ github.event.inputs.sdk_url }}"
-          [ -z "$SDK_LINK" ] && SDK_LINK="$DEFAULT_SDK_URL"
+          SDK_URL="${{ inputs.sdk_url }}"
+          SDK_FILE=$(basename "$SDK_URL")
           
-          echo "Downloading SDK from: $SDK_LINK"
-          wget -q "$SDK_LINK" -O sdk.archive
+          echo "正在下載 SDK: $SDK_FILE"
+          wget -qO "$SDK_FILE" "$SDK_URL"
           
+          echo "正在解壓 SDK..."
           mkdir sdk
-          if file sdk.archive | grep -q 'Zstandard'; then
-            tar -I zstd -xf sdk.archive -C sdk --strip-components=1
-          else
-            tar -xf sdk.archive -C sdk --strip-components=1
-          fi
-          
-          SDK_FILE=$(basename "$SDK_LINK")
-          if [[ "$SDK_FILE" =~ openwrt-sdk-([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-            VER="${BASH_REMATCH[1]}"
-          else
-            VER="snapshot"
-          fi
-          echo "OPENWRT_VERSION=$VER" >> $GITHUB_ENV
-          
-          cd sdk
+          tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
+          rm -f "$SDK_FILE"
+
+      - name: 下載插件原始碼
+        working-directory: ./sdk/package
+        run: |
+          git clone "$PLUGIN_REPO"
+
+      - name: 更新並安裝 Feeds
+        working-directory: ./sdk
+        run: |
+          # 更新並安裝所有 Feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Clone, Fix Dependencies & Translate
-        working-directory: ./sdk/package
-        run: |
-          git clone $PKG_URL $PKG_NAME
-          
-          # === 關鍵修復：移除遞迴依賴 ===
-          echo "正在修復 Makefile 中的遞迴依賴..."
-          # 移除 +rpcd (不管是位於行中或行尾)
-          sed -i 's/+rpcd //g' $PKG_NAME/Makefile
-          sed -i 's/+rpcd//g' $PKG_NAME/Makefile
-          
-          cd $PKG_NAME/po
-          
-          echo "=== 步驟 1: 處理簡體中文 (Base) ==="
-          if [ -d "zh-cn" ]; then
-            mv zh-cn zh_Hans
-            sed -i 's/Language: zh_CN/Language: zh_Hans/g' zh_Hans/*.po
-            sed -i 's/"Language-Team: zh_CN/"Language-Team: zh_Hans/g' zh_Hans/*.po
-          fi
-          
-          echo "=== 步驟 2: 建立繁體中文 (New) ==="
-          if [ -d "zh_Hans" ]; then
-            cp -r zh_Hans zh_Hant
-            for file in zh_Hant/*.po; do
-              opencc -c s2tw.json -i "$file" -o "$file.tmp"
-              mv "$file.tmp" "$file"
-              sed -i 's/Language: zh_Hans/Language: zh_Hant/g' "$file"
-              sed -i 's/Language: zh_CN/Language: zh_Hant/g' "$file"
-              sed -i 's/"Language-Team: zh_Hans/"Language-Team: zh_Hant/g' "$file"
-            done
-          fi
-
-      - name: Configure Build
+      - name: 配置並編譯
         working-directory: ./sdk
         run: |
           make defconfig
           
-          # 關閉 u-boot 避免不必要的錯誤
-          sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=y/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
-          sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=m/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
-
-          # 設定插件
-          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          echo "CONFIG_LUCI_LANG_zh_Hant=y" >> .config
-          echo "CONFIG_PACKAGE_$PKG_NAME=m" >> .config
+          # 強制設定包為編譯模組 (m)
+          echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
           
+          # 再次 defconfig 確保依賴被選中
           make defconfig
           
-          # 暴力開啟語言包
-          sed -i "s/# CONFIG_PACKAGE_luci-i18n-${PKG_NAME#luci-app-}-\(.*\) is not set/CONFIG_PACKAGE_luci-i18n-${PKG_NAME#luci-app-}-\1=m/g" .config
+          # 檢查配置是否生效
+          echo "檢查 .config 配置..."
+          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
           
-          make defconfig
+          echo "開始編譯 $PACKAGE_NAME ..."
+          make package/$PACKAGE_NAME/compile V=s -j$(nproc)
+
+      - name: 整理安裝包
+        run: |
+          mkdir -p output
+          # 搜尋編譯出的 ipk
+          find sdk/bin -type f -name "*aurora-config*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
           
-          # 檢查依賴修復是否生效 (不應再出現 recursive dependency error)
-          echo "=== Build Config Check ==="
-          grep "CONFIG_PACKAGE_$PKG_NAME" .config
+          echo "--- 輸出目錄內容 ---"
+          ls -lh output/
+          
+          if [ -z "$(ls -A output)" ]; then
+             echo "錯誤：未找到編譯出的文件！"
+             exit 1
+          fi
 
-      - name: Compile Package
-        working-directory: ./sdk
+      - name: 設定成品名稱
+        id: set_name
         run: |
-          echo "=== Start Compiling $PKG_NAME ==="
-          # 使用 IGNORE_ERRORS=1 忽略非致命錯誤 (如 po 格式警告)
-          make package/$PKG_NAME/compile V=s -j$(nproc) IGNORE_ERRORS=1 || \
-          make package/$PKG_NAME/compile V=s -j1 IGNORE_ERRORS=1
+          SDK_URL="${{ inputs.sdk_url }}"
+          
+          if [[ "$SDK_URL" == *"snapshots"* ]]; then
+            OP_VERSION="SNAPSHOT"
+          elif [[ "$SDK_URL" == *"releases"* ]]; then
+            # 提取版本號 (例如 24.10.5)
+            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
+          else
+            OP_VERSION="Custom"
+          fi
+          
+          echo "偵測到的版本: $OP_VERSION"
+          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
 
-      - name: Organize Files
-        run: |
-          mkdir -p bin-output
-          # 支援 ipk (舊版) 和 apk (新版)
-          find sdk/bin/ -type f \( -name "${PKG_NAME}*.*pk" -o -name "luci-i18n-${PKG_NAME#luci-app-}*.*pk" \) -exec cp -v {} bin-output/ \;
-          ls -R bin-output/
-
-      - name: Upload Artifact
+      - name: 上傳成品
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PKG_NAME }}-${{ env.OPENWRT_VERSION }}-zh-tw
-          path: bin-output/
-          if-no-files-found: error
+          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
+          path: output/*
