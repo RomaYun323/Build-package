@@ -47,117 +47,58 @@ jobs:
         run: |
           git clone "$PLUGIN_REPO"
 
-      - name: 檢測並自動生成繁體中文 (OpenCC)
+      - name: 標準化語言包並轉換繁體 (OpenCC)
         working-directory: ./sdk/package
         run: |
           # 尋找插件目錄
           PKG_DIR=$(find . -maxdepth 1 -type d -name "*temp-status*" | head -n 1)
           if [ -z "$PKG_DIR" ]; then echo "錯誤：找不到插件目錄"; exit 1; fi
           cd "$PKG_DIR"
-
           echo "進入目錄: $(pwd)"
           
           PO_DIR="po"
           SRC_HANS="$PO_DIR/zh_Hans"
           DEST_HANT="$PO_DIR/zh_Hant"
-          SRC_CN="$PO_DIR/zh-cn"
-          DEST_TW="$PO_DIR/zh-tw"
+          LEGACY_CN="$PO_DIR/zh-cn"
+          
+          # --- 步驟 1: 強制標準化簡體中文目錄 (zh-cn -> zh_Hans) ---
+          if [ -d "$LEGACY_CN" ]; then
+            if [ -d "$SRC_HANS" ]; then
+              echo "檢測到 zh-cn 與 zh_Hans 同時存在，移除舊版 zh-cn 以避免衝突..."
+              rm -rf "$LEGACY_CN"
+            else
+              echo "檢測到舊版命名 '$LEGACY_CN'，正在重新命名為 '$SRC_HANS'..."
+              mv "$LEGACY_CN" "$SRC_HANS"
+              
+              # 修正重新命名後的檔案標頭，確保編譯器能識別
+              if [ -d "$SRC_HANS" ]; then
+                for file in "$SRC_HANS"/*.po; do
+                  [ -e "$file" ] || continue
+                  # 將內部的 zh_CN/zh-cn 標頭改為 zh_Hans
+                  sed -i "s/\"Language: zh_CN/\"Language: zh_Hans/g" "$file"
+                  sed -i "s/\"Language: zh-cn/\"Language: zh_Hans/g" "$file"
+                done
+              fi
+            fi
+          fi
 
-          if [ -d "$DEST_HANT" ] || [ -d "$DEST_TW" ]; then
-            echo "檢測到已存在繁體中文語言包，跳過轉換。"
+          # --- 步驟 2: 檢查繁體中文是否存在，若無則生成 ---
+          if [ -d "$DEST_HANT" ]; then
+            echo "檢測到繁體中文 ($DEST_HANT) 已存在，跳過轉換。"
           else
-            echo "未檢測到繁體中文，尋找簡體中文來源..."
+            echo "未檢測到繁體中文，準備從 $SRC_HANS 生成..."
             
             if [ -d "$SRC_HANS" ]; then
-              SRC="$SRC_HANS"
-              DEST="$DEST_HANT"
-              LANG_CODE="zh_Hant"
-            elif [ -d "$SRC_CN" ]; then
-              SRC="$SRC_CN"
-              DEST="$DEST_TW"
-              LANG_CODE="zh_TW"
-            else
-              echo "警告：也找不到簡體中文語言包，無法轉換 (將編譯英文版)。"
-              # 這裡不退出 exit 0，讓流程繼續，因為可以只編譯英文版
-            fi
-            
-            if [ -n "$SRC" ]; then
-              echo "發現來源: $SRC"
-              echo "準備轉換至: $DEST"
-              mkdir -p "$DEST"
+              mkdir -p "$DEST_HANT"
               
-              for file in "$SRC"/*.po; do
+              for file in "$SRC_HANS"/*.po; do
                 [ -e "$file" ] || continue
                 filename=$(basename "$file")
+                echo "正在轉換: $filename"
                 
-                # OpenCC 轉換 (s2tw: 簡體 -> 台灣正體)
-                opencc -c s2tw -i "$file" -o "$DEST/$filename"
+                # 1. OpenCC 轉換 (s2tw: 簡體 -> 台灣正體)
+                opencc -c s2tw -i "$file" -o "$DEST_HANT/$filename"
                 
-                # 修正 po 檔標頭與用語
-                sed -i "s/zh_Hans/$LANG_CODE/g" "$DEST/$filename"
-                sed -i "s/zh_CN/$LANG_CODE/g" "$DEST/$filename"
-                sed -i "s/zh-cn/$LANG_CODE/g" "$DEST/$filename"
-                
-                # 簡單的詞彙修正
-                sed -i 's/配置文件/設定檔/g' "$DEST/$filename"
-                sed -i 's/配置/設定/g' "$DEST/$filename"
-                sed -i 's/保存/儲存/g' "$DEST/$filename"
-              done
-              echo "繁體中文轉換完成！"
-            fi
-          fi
-
-      - name: 更新並安裝 Feeds
-        working-directory: ./sdk
-        run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: 配置並編譯
-        working-directory: ./sdk
-        run: |
-          make defconfig
-          
-          echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
-          make defconfig
-          
-          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
-          
-          echo "開始編譯 $PACKAGE_NAME ..."
-          make package/$PACKAGE_NAME/compile V=s -j$(nproc)
-
-      - name: 整理安裝包
-        run: |
-          mkdir -p output
-          # 搜尋包含 temp-status 的 ipk 文件
-          find sdk/bin -type f -name "*temp-status*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
-          
-          echo "--- 輸出目錄內容 ---"
-          ls -lh output/
-          
-          if [ -z "$(ls -A output)" ]; then
-             echo "錯誤：未找到編譯出的文件！"
-             exit 1
-          fi
-
-      - name: 設定成品名稱
-        id: set_name
-        run: |
-          SDK_URL="${{ inputs.sdk_url }}"
-          
-          if [[ "$SDK_URL" == *"snapshots"* ]]; then
-            OP_VERSION="SNAPSHOT"
-          elif [[ "$SDK_URL" == *"releases"* ]]; then
-            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
-          else
-            OP_VERSION="Custom"
-          fi
-          
-          echo "偵測到的版本: $OP_VERSION"
-          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
-
-      - name: 上傳成品
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
-          path: output/*
+                # 2. 修正 po 檔標頭 (Language: zh_Hans -> zh_Hant)
+                sed -i "s/Language: zh_Hans/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh_CN/Language: zh_
