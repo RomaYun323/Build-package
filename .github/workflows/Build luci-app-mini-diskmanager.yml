@@ -20,13 +20,14 @@ jobs:
       - name: 初始化環境
         uses: actions/checkout@v4
 
-      - name: 安裝編譯依賴
+      - name: 安裝編譯依賴與 OpenCC
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
             python3-distutils rsync unzip zlib1g-dev file wget zstd \
-            ccache ecj fastjar libelf-dev xsltproc python3-pyelftools
+            ccache ecj fastjar libelf-dev xsltproc python3-pyelftools \
+            opencc
 
       - name: 下載並解壓 SDK
         run: |
@@ -46,6 +47,75 @@ jobs:
         run: |
           git clone "$PLUGIN_REPO"
 
+      - name: 標準化語言包並轉換繁體 (OpenCC)
+        working-directory: ./sdk/package
+        run: |
+          # 尋找插件目錄
+          PKG_DIR=$(find . -maxdepth 1 -type d -name "*mini-diskmanager*" | head -n 1)
+          if [ -z "$PKG_DIR" ]; then echo "錯誤：找不到插件目錄"; exit 1; fi
+          cd "$PKG_DIR"
+          echo "進入目錄: $(pwd)"
+          
+          PO_DIR="po"
+          SRC_HANS="$PO_DIR/zh_Hans"
+          DEST_HANT="$PO_DIR/zh_Hant"
+          LEGACY_CN="$PO_DIR/zh-cn"
+          
+          # --- 步驟 1: 強制標準化簡體中文目錄 (zh-cn -> zh_Hans) ---
+          if [ -d "$LEGACY_CN" ]; then
+            if [ -d "$SRC_HANS" ]; then
+              echo "檢測到 zh-cn 與 zh_Hans 同時存在，移除舊版 zh-cn 以避免衝突..."
+              rm -rf "$LEGACY_CN"
+            else
+              echo "檢測到舊版命名 '$LEGACY_CN'，正在重新命名為 '$SRC_HANS'..."
+              mv "$LEGACY_CN" "$SRC_HANS"
+              
+              if [ -d "$SRC_HANS" ]; then
+                for file in "$SRC_HANS"/*.po; do
+                  [ -e "$file" ] || continue
+                  # 修正 po 檔內部的標頭
+                  sed -i "s/Language: zh_CN/Language: zh_Hans/g" "$file"
+                  sed -i "s/Language: zh-cn/Language: zh_Hans/g" "$file"
+                done
+              fi
+            fi
+          fi
+
+          # --- 步驟 2: 檢查繁體中文是否存在，若無則生成 ---
+          if [ -d "$DEST_HANT" ]; then
+            echo "檢測到繁體中文 ($DEST_HANT) 已存在，跳過轉換。"
+          else
+            echo "未檢測到繁體中文，準備從 $SRC_HANS 生成..."
+            
+            if [ -d "$SRC_HANS" ]; then
+              mkdir -p "$DEST_HANT"
+              
+              for file in "$SRC_HANS"/*.po; do
+                [ -e "$file" ] || continue
+                filename=$(basename "$file")
+                echo "正在轉換: $filename"
+                
+                # OpenCC 轉換 (簡體 -> 台灣繁體)
+                opencc -c s2tw -i "$file" -o "$DEST_HANT/$filename"
+                
+                # 修正 po 檔標頭
+                sed -i "s/Language: zh_Hans/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh_CN/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh-cn/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                
+                # 詞彙修正
+                sed -i "s/配置文件/設定檔/g" "$DEST_HANT/$filename"
+                sed -i "s/配置/設定/g" "$DEST_HANT/$filename"
+                sed -i "s/保存/儲存/g" "$DEST_HANT/$filename"
+                sed -i "s/應用/套用/g" "$DEST_HANT/$filename"
+                sed -i "s/启用/啟用/g" "$DEST_HANT/$filename"
+              done
+              echo "繁體中文生成完畢！"
+            else
+              echo "警告：找不到 $SRC_HANS (簡體來源)，無法進行轉換。"
+            fi
+          fi
+
       - name: 更新並安裝 Feeds
         working-directory: ./sdk
         run: |
@@ -57,58 +127,90 @@ jobs:
         run: |
           make defconfig
           
-          # 嘗試明確安裝目標包的依賴
+          # 安裝依賴 (保留您原本的邏輯)
           ./scripts/feeds install luci-base luci-compat libparted smartmontools || true
           
-          # 強制寫入編譯設定 (m = 模組/ipk)
-          sed -i "s/# CONFIG_PACKAGE_$PACKAGE_NAME is not set/CONFIG_PACKAGE_$PACKAGE_NAME=m/" .config
+          # --- 設定編譯選項 ---
+          # 1. 開啟主程式
+          echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
           
-          if ! grep -q "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config; then
-            echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
-          fi
+          # 2. 強制開啟語言包 (針對 mini-diskmanager)
+          echo "CONFIG_PACKAGE_luci-i18n-mini-diskmanager-zh-hans=m" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-mini-diskmanager-zh-hant=m" >> .config
           
+          # 應用設定
           make defconfig
+          
+          # 檢查設定是否生效
+          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || echo "警告：主程式設定可能未生效"
+          grep "CONFIG_PACKAGE_luci-i18n-mini-diskmanager" .config || echo "警告：語言包設定可能未生效"
           
           echo "開始編譯 $PACKAGE_NAME ..."
           make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
-      - name: 整理安裝包
+      - name: 整理並重新命名安裝包 (版本號歸零)
         run: |
           mkdir -p output
-          # 搜尋編譯出的 ipk 或 apk 文件
+          # 1. 搜尋並複製 ipk/apk 檔案
           find sdk/bin -type f -name "*mini-diskmanager*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
-          
-          echo "--- 輸出目錄內容 ---"
-          ls -lh output/
           
           if [ -z "$(ls -A output)" ]; then
              echo "錯誤：未找到編譯出的文件！"
              exit 1
           fi
 
-      - name: 設定成品名稱 (僅 OpenWrt 版本)
+          echo "--- 開始執行重命名 (i18n 版本號強制為 0) ---"
+          cd output
+          for file in *; do
+            [ -f "$file" ] || continue
+            
+            # 僅針對包含 "i18n" 的語言包進行重命名
+            if [[ "$file" == *"i18n"* ]]; then
+                # 1. 取得副檔名
+                ext="${file##*.}"
+                # 2. 取得檔名無副檔名
+                filename_no_ext="${file%.*}"
+                
+                # 3. 取得「架構」 (最後一個底線 _ 後的內容)
+                arch="${filename_no_ext##*_}"
+                
+                # 4. 取得「名稱_版本」 (去除 _架構)
+                name_ver="${filename_no_ext%_*}"
+                
+                # 5. 取得「名稱」 (去除 _版本 -> 即去除最後一個底線後的內容)
+                # 這樣會把中間那串版本號/亂碼去掉
+                name="${name_ver%_*}"
+                
+                # 6. 組合新名稱 -> 名稱_0_架構.副檔名
+                new_file="${name}_0_${arch}.${ext}"
+                
+                if [[ "$file" != "$new_file" ]]; then
+                    echo "重命名: $file -> $new_file"
+                    mv "$file" "$new_file"
+                fi
+            else
+                echo "保留主程式原名: $file"
+            fi
+          done
+          
+          echo "--- 最終輸出目錄內容 ---"
+          ls -lh
+
+      - name: 設定成品名稱
         id: set_name
         run: |
           SDK_URL="${{ inputs.sdk_url }}"
-          
-          # --- 判斷 OpenWrt 版本 ---
           if [[ "$SDK_URL" == *"snapshots"* ]]; then
             OP_VERSION="SNAPSHOT"
           elif [[ "$SDK_URL" == *"releases"* ]]; then
-            # 提取版本號 (例如 24.10.5)
             OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
           else
             OP_VERSION="Custom"
           fi
-          
-          echo "偵測到的版本: $OP_VERSION"
-          
-          # 設定環境變數供上傳步驟使用 (已移除 PKG_TYPE)
           echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
 
       - name: 上傳成品
         uses: actions/upload-artifact@v4
         with:
-          # 最終名稱範例: luci-app-mini-diskmanager-24.10.5
-          name: luci-app-mini-diskmanager-${{ env.ARTIFACT_SUFFIX }}
+          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
           path: output/*
