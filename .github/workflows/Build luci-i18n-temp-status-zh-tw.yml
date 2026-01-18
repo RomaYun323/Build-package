@@ -160,7 +160,6 @@ jobs:
                     name_ver="${base%_*}"
                     
                     # 4. 提取 "名稱" (去掉 _版本 -> 去掉最後一個底線後的字串)
-                    # 假設 Name 不含底線，或者版本號在最後一段
                     name="${name_ver%_*}"
                     
                     new_file="${name}_0_${arch}.${ext}"
@@ -194,14 +193,4 @@ jobs:
           if [[ "$SDK_URL" == *"snapshots"* ]]; then
             OP_VERSION="SNAPSHOT"
           elif [[ "$SDK_URL" == *"releases"* ]]; then
-            OP_VERSION=$(echo "$SDK_URL" | grep -oP 'releases/\K[0-9.]+(?=/targets)')
-          else
-            OP_VERSION="Custom"
-          fi
-          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
-
-      - name: 上傳成品
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
-          path: output/*
+            # 修正：支援 rc/
