@@ -33,10 +33,10 @@ jobs:
         run: |
           SDK_URL="${{ inputs.sdk_url }}"
           SDK_FILE=$(basename "$SDK_URL")
-          
+           
           echo "正在下載 SDK: $SDK_FILE"
           wget -qO "$SDK_FILE" "$SDK_URL"
-          
+           
           echo "正在解壓 SDK..."
           mkdir sdk
           tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
@@ -57,23 +57,23 @@ jobs:
         working-directory: ./sdk
         run: |
           make defconfig
-          
+           
           # 安裝依賴
           ./scripts/feeds install luci-base luci-compat libparted smartmontools || true
-          
+           
           # --- 設定編譯選項 ---
           # 1. 開啟主程式
           echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
-          
+           
           # 2. 強制開啟語言包 
           # (若原碼中有對應語言包才會生成，若無則會自動忽略)
           echo "CONFIG_PACKAGE_luci-i18n-mini-diskmanager-zh-hans=m" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-mini-diskmanager-zh-hant=m" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-mini-diskmanager-zh-cn=m" >> .config
-          
+           
           # 應用設定
           make defconfig
-          
+           
           echo "開始編譯 $PACKAGE_NAME ..."
           make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
@@ -82,7 +82,7 @@ jobs:
           mkdir -p output
           # 1. 搜尋並複製 ipk/apk 檔案
           find sdk/bin -type f -name "*mini-diskmanager*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
-          
+           
           if [ -z "$(ls -A output)" ]; then
              echo "錯誤：未找到編譯出的文件！"
              exit 1
@@ -95,25 +95,42 @@ jobs:
             
             # 僅針對包含 "i18n" 的語言包進行重命名
             if [[ "$file" == *"i18n"* ]]; then
-                # 1. 取得副檔名
+                # 1. 取得副檔名 (ipk 或 apk)
                 ext="${file##*.}"
                 # 2. 取得檔名無副檔名
                 filename_no_ext="${file%.*}"
                 
-                # 3. 取得「架構」 (最後一個底線 _ 後的內容)
-                arch="${filename_no_ext##*_}"
+                new_file=""
+
+                if [[ "$ext" == "ipk" ]]; then
+                    # --- IPK 處理邏輯 (使用下底線 _ 分隔) ---
+                    # 格式: Name_Version_Arch.ipk -> 改為: Name_0_Arch.ipk
+                    
+                    # 取得「架構」 (最後一個底線 _ 後的內容)
+                    arch="${filename_no_ext##*_}"
+                    
+                    # 去除 _架構，剩下 Name_Version
+                    name_ver="${filename_no_ext%_*}"
+                    
+                    # 去除 _Version，剩下 Name (去除最後一個底線後的內容)
+                    name="${name_ver%_*}"
+                    
+                    # 組合新名稱
+                    new_file="${name}_0_${arch}.${ext}"
+
+                elif [[ "$ext" == "apk" ]]; then
+                    # --- APK 處理邏輯 (使用連字號 - 分隔) ---
+                    # 格式: Name-Version.apk -> 改為: Name-0.apk
+                    
+                    # 取得 Name (去除最後一個連字號 - 後的內容)
+                    name="${filename_no_ext%-*}"
+                    
+                    # 組合新名稱
+                    new_file="${name}-0.${ext}"
+                fi
                 
-                # 4. 取得「名稱_版本」 (去除 _架構)
-                name_ver="${filename_no_ext%_*}"
-                
-                # 5. 取得「名稱」 (去除 _版本 -> 即去除最後一個底線後的內容)
-                # 這樣會把中間那串版本號/亂碼去掉
-                name="${name_ver%_*}"
-                
-                # 6. 組合新名稱 -> 名稱_0_架構.副檔名
-                new_file="${name}_0_${arch}.${ext}"
-                
-                if [[ "$file" != "$new_file" ]]; then
+                # 執行重命名
+                if [[ -n "$new_file" && "$file" != "$new_file" ]]; then
                     echo "重命名: $file -> $new_file"
                     mv "$file" "$new_file"
                 fi
@@ -121,7 +138,7 @@ jobs:
                 echo "保留主程式原名: $file"
             fi
           done
-          
+           
           echo "--- 最終輸出目錄內容 ---"
           ls -lh
 
@@ -132,7 +149,8 @@ jobs:
           if [[ "$SDK_URL" == *"snapshots"* ]]; then
             OP_VERSION="SNAPSHOT"
           elif [[ "$SDK_URL" == *"releases"* ]]; then
-            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
+            # 修正：使用 grep -oP 搭配 [^/]+ 以匹配任意版本字元 (包含 rc 版或英數混合)
+            OP_VERSION=$(echo "$SDK_URL" | grep -oP 'releases/\K[^/]+(?=/targets)')
           else
             OP_VERSION="Custom"
           fi
