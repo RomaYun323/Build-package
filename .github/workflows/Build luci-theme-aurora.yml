@@ -60,7 +60,7 @@ jobs:
           # --- 設定編譯選項 ---
           echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
           
-          # 針對 Aurora 主題的語言包處理 (如果有)
+          # 針對 Aurora 主題的語言包處理
           echo "CONFIG_PACKAGE_luci-i18n-aurora-zh-cn=m" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-aurora-zh-tw=m" >> .config
           
@@ -68,44 +68,21 @@ jobs:
           echo "開始編譯 $PACKAGE_NAME ..."
           make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
-      - name: 整理並重新命名安裝包 (版本號歸零)
+      - name: 整理成品 (保留原始檔名)
         run: |
           mkdir -p output
+          # 搜尋並複製包含 aurora 關鍵字的 ipk 或 apk 檔案
           find sdk/bin -type f -name "*aurora*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
           
           if [ -z "$(ls -A output)" ]; then
              echo "錯誤：未找到編譯出的文件！"
              exit 1
           fi
+          
+          echo "--- 最終輸出目錄內容 ---"
+          ls -lh output/
 
-          cd output
-          for file in *; do
-            [ -f "$file" ] || continue
-            
-            # 針對主題包與其語言包進行重命名
-            ext="${file##*.}"
-            filename_no_ext="${file%.*}"
-            new_file=""
-
-            if [[ "$ext" == "ipk" ]]; then
-                # IPK: Name_Version_Arch.ipk -> Name_0_Arch.ipk
-                arch="${filename_no_ext##*_}"
-                name_ver="${filename_no_ext%_*}"
-                name="${name_ver%_*}"
-                new_file="${name}_0_${arch}.${ext}"
-            elif [[ "$ext" == "apk" ]]; then
-                # APK: Name-Version.apk -> Name-0.apk
-                name="${filename_no_ext%-*}"
-                new_file="${name}-0.${ext}"
-            fi
-            
-            if [[ -n "$new_file" && "$file" != "$new_file" ]]; then
-                echo "重命名: $file -> $new_file"
-                mv "$file" "$new_file"
-            fi
-          done
-
-      - name: 設定成品名稱
+      - name: 設定成品名稱標籤
         id: set_name
         run: |
           SDK_URL="${{ inputs.sdk_url }}"
