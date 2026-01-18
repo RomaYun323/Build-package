@@ -6,7 +6,7 @@ on:
       sdk_url:
         description: 'OpenWrt SDK 下載地址 (.tar.zst)'
         required: true
-        default: 'https://downloads.openwrt.org/releases/24.10.0/targets/rockchip/armv8/openwrt-sdk-24.10.0-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+        default: 'https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
 
 env:
   PLUGIN_REPO: "https://github.com/gSpotx2f/luci-app-temp-status.git"
