@@ -62,6 +62,7 @@ jobs:
           LEGACY_CN="$PO_DIR/zh-cn"
           
           # --- 步驟 1: 強制標準化簡體中文目錄 (zh-cn -> zh_Hans) ---
+          # 這是關鍵：必須先確保來源目錄名稱正確，後續轉換與編譯才能識別
           if [ -d "$LEGACY_CN" ]; then
             if [ -d "$SRC_HANS" ]; then
               echo "檢測到 zh-cn 與 zh_Hans 同時存在，移除舊版 zh-cn 以避免衝突..."
@@ -73,7 +74,7 @@ jobs:
               if [ -d "$SRC_HANS" ]; then
                 for file in "$SRC_HANS"/*.po; do
                   [ -e "$file" ] || continue
-                  # 修正標頭
+                  # 修正 po 檔內部的標頭
                   sed -i "s/Language: zh_CN/Language: zh_Hans/g" "$file"
                   sed -i "s/Language: zh-cn/Language: zh_Hans/g" "$file"
                 done
@@ -95,7 +96,7 @@ jobs:
                 filename=$(basename "$file")
                 echo "正在轉換: $filename"
                 
-                # OpenCC 轉換
+                # OpenCC 轉換 (簡體 -> 台灣繁體)
                 opencc -c s2tw -i "$file" -o "$DEST_HANT/$filename"
                 
                 # 修正 po 檔標頭
@@ -108,6 +109,7 @@ jobs:
                 sed -i "s/配置/設定/g" "$DEST_HANT/$filename"
                 sed -i "s/保存/儲存/g" "$DEST_HANT/$filename"
                 sed -i "s/應用/套用/g" "$DEST_HANT/$filename"
+                sed -i "s/启用/啟用/g" "$DEST_HANT/$filename"
               done
               echo "繁體中文生成完畢！"
             else
@@ -118,6 +120,7 @@ jobs:
       - name: 更新並安裝 Feeds
         working-directory: ./sdk
         run: |
+          # 必須在原始碼修改完成後執行，這樣 feeds 才會掃描到新生成的 po 目錄
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -125,17 +128,31 @@ jobs:
         working-directory: ./sdk
         run: |
           make defconfig
+          
+          # --- 設定編譯選項 ---
+          # 1. 開啟主程式
           echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
+          
+          # 2. 強制開啟語言包 (解決不生成語言包的關鍵步驟)
+          # OpenWrt 對於 po/zh_Hans 目錄會自動註冊 luci-i18n-*-zh-hans
+          # 對於 po/zh_Hant 目錄會自動註冊 luci-i18n-*-zh-hant
+          echo "CONFIG_PACKAGE_luci-i18n-temp-status-zh-hans=m" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-temp-status-zh-hant=m" >> .config
+          
+          # 應用設定
           make defconfig
-          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
+          
+          # 檢查設定是否生效 (除錯用)
+          echo "--- 檢查 .config 中的 i18n 設定 ---"
+          grep "CONFIG_PACKAGE_luci-i18n-temp-status" .config || echo "警告：未找到語言包設定！"
           
           echo "開始編譯 $PACKAGE_NAME ..."
           make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
-      - name: 整理並重新命名安裝包
+      - name: 整理並重新命名安裝包 (版本號歸零)
         run: |
           mkdir -p output
-          # 1. 先將檔案複製出來
+          # 1. 搜尋並複製 ipk/apk 檔案到 output 目錄
           find sdk/bin -type f -name "*temp-status*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
           
           if [ -z "$(ls -A output)" ]; then
@@ -143,36 +160,38 @@ jobs:
              exit 1
           fi
 
-          echo "--- 開始執行重命名 ---"
+          echo "--- 開始執行重命名 (i18n 版本號強制為 0) ---"
           cd output
           for file in *; do
             [ -f "$file" ] || continue
-            filename=$(basename "$file")
             
-            # 僅處理包含 "i18n" 的檔案
-            if [[ "$filename" == *"i18n"* ]]; then
-                # 拆解結構 (假設標準格式: Name_Version_Arch.ext)
-                ext="${filename##*.}"
-                base_no_ext="${filename%.*}"
+            # 僅針對包含 "i18n" 的語言包進行重命名
+            if [[ "$file" == *"i18n"* ]]; then
+                # 1. 取得副檔名 (ipk 或 apk)
+                ext="${file##*.}"
+                # 2. 取得檔名本身 (去除副檔名)
+                filename_no_ext="${file%.*}"
                 
-                # 取得架構 (最後一個底線後的內容)
-                arch="${base_no_ext##*_}"
+                # OpenWrt 格式通常為: Name_Version_Arch
+                # 3. 取得「架構」 (最後一個底線 _ 後的內容, 例: all)
+                arch="${filename_no_ext##*_}"
                 
-                # 取得 名稱+版本 (移除架構)
-                name_and_ver="${base_no_ext%_*}"
+                # 4. 取得「名稱_版本」 (去除 _架構)
+                name_ver="${filename_no_ext%_*}"
                 
-                # 取得 名稱 (移除版本 -> 移除最後一個底線後的內容)
-                name="${name_and_ver%_*}"
+                # 5. 取得「名稱」 (去除 _版本 -> 去除最後一個底線後的內容)
+                # 這裡會把中間那串亂碼/版本號去掉
+                name="${name_ver%_*}"
                 
-                # 重組新名稱 (版本號強制為 0)
-                new_filename="${name}_0_${arch}.${ext}"
+                # 6. 組合新名稱 -> 名稱_0_架構.副檔名
+                new_file="${name}_0_${arch}.${ext}"
                 
-                if [[ "$filename" != "$new_filename" ]]; then
-                    echo "i18n 重命名 (Version -> 0): $filename -> $new_filename"
-                    mv "$filename" "$new_filename"
+                if [[ "$file" != "$new_file" ]]; then
+                    echo "重命名: $file -> $new_file"
+                    mv "$file" "$new_file"
                 fi
             else
-                echo "非 i18n 檔案，保留原名: $filename"
+                echo "保留主程式原名: $file"
             fi
           done
           
