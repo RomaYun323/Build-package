@@ -1,4 +1,4 @@
-name: Build luci-app-temp-status
+name: Build luci-app-aurora-config
 
 on:
   workflow_dispatch:
@@ -9,8 +9,8 @@ on:
         default: 'https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
 
 env:
-  PLUGIN_REPO: "https://github.com/gSpotx2f/luci-app-temp-status.git"
-  PACKAGE_NAME: "luci-app-temp-status"
+  PLUGIN_REPO: "https://github.com/eamonxg/luci-app-aurora-config.git"
+  PACKAGE_NAME: "luci-app-aurora-config"
 
 jobs:
   build:
@@ -47,63 +47,62 @@ jobs:
         run: |
           git clone "$PLUGIN_REPO"
 
-      - name: 標準化語言包並轉換繁體 (OpenCC)
+      - name: 檢測並自動生成繁體中文 (OpenCC)
         working-directory: ./sdk/package
         run: |
-          # 尋找插件目錄
-          PKG_DIR=$(find . -maxdepth 1 -type d -name "*temp-status*" | head -n 1)
+          # 1. 進入插件目錄
+          PKG_DIR=$(find . -maxdepth 1 -type d -name "*aurora-config*" | head -n 1)
           if [ -z "$PKG_DIR" ]; then echo "錯誤：找不到插件目錄"; exit 1; fi
           cd "$PKG_DIR"
-          echo "正在處理目錄: $(pwd)"
-          
+          echo "進入目錄: $(pwd)"
+
           PO_DIR="po"
-          SRC_HANS="$PO_DIR/zh_Hans"
-          DEST_HANT="$PO_DIR/zh_Hant"
-          LEGACY_CN="$PO_DIR/zh-cn"
           
-          # --- 步驟 1: 標準化來源目錄 (zh-cn -> zh_Hans) ---
-          if [ -d "$LEGACY_CN" ]; then
-            if [ -d "$SRC_HANS" ]; then
-              rm -rf "$LEGACY_CN"
-            else
-              mv "$LEGACY_CN" "$SRC_HANS"
-              # 修正標頭
-              sed -i "s/Language: zh_CN/Language: zh_Hans/g" "$SRC_HANS"/*.po 2>/dev/null || true
-              sed -i "s/Language: zh-cn/Language: zh_Hans/g" "$SRC_HANS"/*.po 2>/dev/null || true
-            fi
+          if [ ! -d "$PO_DIR" ]; then
+            echo "警告：未找到 po 目錄，跳過翻譯處理。"
+            exit 0
           fi
 
-          # --- 步驟 2: 生成繁體中文 ---
-          if [ -d "$DEST_HANT" ]; then
-            echo "繁體中文已存在，跳過生成。"
-          elif [ -d "$SRC_HANS" ]; then
-            echo "正在生成繁體中文..."
-            mkdir -p "$DEST_HANT"
-            
-            for file in "$SRC_HANS"/*.po; do
+          # --- 步驟 1: 規範化來源目錄名稱 (zh-cn -> zh_Hans) ---
+          if [ -d "$PO_DIR/zh-cn" ] && [ ! -d "$PO_DIR/zh_Hans" ]; then
+            echo "檢測到非標準命名：將 po/zh-cn 重命名為 po/zh_Hans"
+            mv "$PO_DIR/zh-cn" "$PO_DIR/zh_Hans"
+          fi
+
+          # --- 步驟 2: 檢測繁體中文是否存在 ---
+          if [ -d "$PO_DIR/zh_Hant" ] || [ -d "$PO_DIR/zh-tw" ]; then
+            echo "檢測到已存在繁體中文目錄，跳過轉換。"
+            exit 0
+          fi
+
+          # --- 步驟 3: 若不存在繁體，則由簡體轉換 (zh_Hans -> zh_Hant) ---
+          if [ -d "$PO_DIR/zh_Hans" ]; then
+            echo "未檢測到繁體中文，準備從 zh_Hans 轉換..."
+            mkdir -p "$PO_DIR/zh_Hant"
+
+            for file in "$PO_DIR/zh_Hans"/*.po; do
               [ -e "$file" ] || continue
               filename=$(basename "$file")
+              echo "正在轉換: $filename"
+
+              # A. 使用 OpenCC 轉換 (s2tw: 簡體 -> 台灣正體)
+              opencc -c s2tw -i "$file" -o "$PO_DIR/zh_Hant/$filename"
+
+              # B. 修正 .po 標頭與語言代碼
+              sed -i 's/zh_Hans/zh_Hant/g' "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/zh_CN/zh_Hant/g'   "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/zh-cn/zh_Hant/g'   "$PO_DIR/zh_Hant/$filename"
               
-              # OpenCC 轉換 (簡體 -> 台灣繁體)
-              opencc -c s2tw -i "$file" -o "$DEST_HANT/$filename"
-              
-              # 修正 po 檔標頭與詞彙
-              sed -i "s/Language: zh_Hans/Language: zh_Hant/g" "$DEST_HANT/$filename"
-              sed -i "s/Language: zh_CN/Language: zh_Hant/g" "$DEST_HANT/$filename"
-              sed -i "s/Language: zh-cn/Language: zh_Hant/g" "$DEST_HANT/$filename"
-              
-              # 常見詞彙修正
-              sed -i "s/配置文件/設定檔/g" "$DEST_HANT/$filename"
-              sed -i "s/配置/設定/g" "$DEST_HANT/$filename"
-              sed -i "s/保存/儲存/g" "$DEST_HANT/$filename"
-              sed -i "s/應用/套用/g" "$DEST_HANT/$filename"
-              sed -i "s/启用/啟用/g" "$DEST_HANT/$filename"
-              sed -i "s/刷新/重新整理/g" "$DEST_HANT/$filename"
-              sed -i "s/界面/介面/g" "$DEST_HANT/$filename"
-              sed -i "s/插件/外掛/g" "$DEST_HANT/$filename"
+              # C. 術語修正
+              sed -i 's/配置文件/設定檔/g' "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/配置/設定/g'      "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/保存/儲存/g'      "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/应用/套用/g'      "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/启用/啟用/g'      "$PO_DIR/zh_Hant/$filename"
             done
+            echo "轉換完成！"
           else
-            echo "警告：無簡體中文來源，無法轉換。"
+            echo "警告：找不到 zh_Hans 來源，無法轉換。"
           fi
 
       - name: 更新並安裝 Feeds
@@ -116,88 +115,72 @@ jobs:
         working-directory: ./sdk
         run: |
           make defconfig
-          
-          # --- 設定編譯選項 ---
           echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-temp-status-zh-hans=m" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-temp-status-zh-hant=m" >> .config
-          
           make defconfig
+          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
           
           echo "開始編譯 $PACKAGE_NAME ..."
-          make package/$PACKAGE_NAME/compile V=s -j$(nproc) || make package/$PACKAGE_NAME/compile V=s -j1
+          make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
-      - name: 整理並重新命名安裝包 (區分 ipk/apk 規則)
+      - name: 整理並重命名安裝包
         run: |
           mkdir -p output
-          find sdk/bin -type f -name "*temp-status*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
           
-          if [ -z "$(ls -A output)" ]; then
-             echo "錯誤：未找到編譯出的文件！"
-             exit 1
-          fi
-
-          echo "--- 開始執行重命名 ---"
-          cd output
-          for file in *; do
-            [ -f "$file" ] || continue
+          echo "Package Name defined as: $PACKAGE_NAME"
+          
+          # 遍歷 sdk/bin 下所有符合條件的 ipk 與 apk 文件
+          find sdk/bin -type f -name "*aurora-config*" \( -name "*.ipk" -o -name "*.apk" \) | while read -r filepath; do
+            filename=$(basename "$filepath")
+            ext="${filename##*.}"
             
-            # 僅針對 i18n 語言包重命名
-            if [[ "$file" == *"i18n"* ]]; then
-                ext="${file##*.}"
-                new_file=""
-
-                if [[ "$ext" == "ipk" ]]; then
-                    # --- IPK 規則: Name_Version_Arch.ipk -> Name_0_Arch.ipk ---
-                    
-                    # 1. 取得主檔名 (luci-i18n..._all)
-                    base="${file%.*}"
-                    
-                    # 2. 提取架構 (最後一個底線後的字串: all)
-                    arch="${base##*_}"
-                    
-                    # 3. 提取 "名稱_版本" (去掉 _架構)
-                    name_ver="${base%_*}"
-                    
-                    # 4. 提取 "名稱" (去掉 _版本 -> 去掉最後一個底線後的字串)
-                    name="${name_ver%_*}"
-                    
-                    new_file="${name}_0_${arch}.${ext}"
-
-                elif [[ "$ext" == "apk" ]]; then
-                    # --- APK 規則: Name-Version.apk -> Name-0.apk ---
-                    
-                    # 1. 提取名稱 (找到第一個 "-數字" 出現的位置並切除後面)
-                    name=$(echo "$file" | sed -E 's/-[0-9].*//')
-                    
-                    new_file="${name}-0.${ext}"
-                fi
-
-                # 執行重命名
-                if [[ -n "$new_file" && "$file" != "$new_file" ]]; then
-                    echo "重命名 [$ext]: $file -> $new_file"
-                    mv "$file" "$new_file"
-                fi
+            # --- 判斷邏輯開始 ---
+            # 檢查檔名開頭是否完全匹配 PACKAGE_NAME (加上分隔符 _ 或 - 以確保精確匹配)
+            if [[ "$filename" == "$PACKAGE_NAME"_* ]] || [[ "$filename" == "$PACKAGE_NAME"-* ]]; then
+              
+              # 情況 A：本體插件 -> 直接複製，不改名
+              echo "保留本體原名: $filename"
+              cp "$filepath" "output/$filename"
+              
             else
-                echo "保留主程式原名: $file"
+              
+              # 情況 B：附屬包 (如 i18n, l10n) -> 修改版本號為 0
+              if [[ "$ext" == "ipk" ]]; then
+                # IPK: name_version_arch.ipk -> name_0_arch.ipk
+                new_filename=$(echo "$filename" | sed -E 's/^(.*)_([^_]+)_([^_]+\.ipk)$/\1_0_\3/')
+              elif [[ "$ext" == "apk" ]]; then
+                # APK: name-version.apk -> name-0.apk
+                new_filename=$(echo "$filename" | sed -E 's/^(.*)-([^-]+)\.apk$/\1-0.apk/')
+              fi
+              
+              echo "重命名並複製: $filename -> $new_filename"
+              cp "$filepath" "output/$new_filename"
             fi
+            # --- 判斷邏輯結束 ---
+            
           done
           
-          echo "--- 最終輸出目錄內容 ---"
-          ls -lh
+          echo "--- 輸出目錄最終內容 ---"
+          ls -lh output/
+          
+          if [ -z "$(ls -A output)" ]; then
+              echo "錯誤：未找到編譯出的文件！"
+              exit 1
+          fi
 
-      - name: 設定成品名稱
+      - name: 設定成品標識
         id: set_name
         run: |
           SDK_URL="${{ inputs.sdk_url }}"
+          
           if [[ "$SDK_URL" == *"snapshots"* ]]; then
             OP_VERSION="SNAPSHOT"
           elif [[ "$SDK_URL" == *"releases"* ]]; then
-            # 修正：支援 rc/alpha 等非純數字版本號
-            OP_VERSION=$(echo "$SDK_URL" | grep -oP 'releases/\K[^/]+(?=/targets)')
+            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
           else
             OP_VERSION="Custom"
           fi
+          
+          echo "偵測到的 SDK 版本: $OP_VERSION"
           echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
 
       - name: 上傳成品
