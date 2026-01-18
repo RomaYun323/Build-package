@@ -1,0 +1,114 @@
+name: Build luci-app-mini-diskmanager
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_url:
+        description: 'OpenWrt SDK 下載地址 (.tar.zst)'
+        required: true
+        default: 'https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+
+env:
+  PLUGIN_REPO: "https://github.com/4IceG/luci-app-mini-diskmanager.git"
+  PACKAGE_NAME: "luci-app-mini-diskmanager"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: 初始化環境
+        uses: actions/checkout@v4
+
+      - name: 安裝編譯依賴
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget zstd \
+            ccache ecj fastjar libelf-dev xsltproc python3-pyelftools
+
+      - name: 下載並解壓 SDK
+        run: |
+          SDK_URL="${{ inputs.sdk_url }}"
+          SDK_FILE=$(basename "$SDK_URL")
+          
+          echo "正在下載 SDK: $SDK_FILE"
+          wget -qO "$SDK_FILE" "$SDK_URL"
+          
+          echo "正在解壓 SDK..."
+          mkdir sdk
+          tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
+          rm -f "$SDK_FILE"
+
+      - name: 下載插件原始碼
+        working-directory: ./sdk/package
+        run: |
+          git clone "$PLUGIN_REPO"
+
+      - name: 更新並安裝 Feeds
+        working-directory: ./sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 配置並編譯
+        working-directory: ./sdk
+        run: |
+          make defconfig
+          
+          # 嘗試明確安裝目標包的依賴
+          ./scripts/feeds install luci-base luci-compat libparted smartmontools || true
+          
+          # 強制寫入編譯設定 (m = 模組/ipk)
+          sed -i "s/# CONFIG_PACKAGE_$PACKAGE_NAME is not set/CONFIG_PACKAGE_$PACKAGE_NAME=m/" .config
+          
+          if ! grep -q "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config; then
+            echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
+          fi
+          
+          make defconfig
+          
+          echo "開始編譯 $PACKAGE_NAME ..."
+          make package/$PACKAGE_NAME/compile V=s -j$(nproc)
+
+      - name: 整理安裝包
+        run: |
+          mkdir -p output
+          # 搜尋編譯出的 ipk 或 apk 文件
+          find sdk/bin -type f -name "*mini-diskmanager*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
+          
+          echo "--- 輸出目錄內容 ---"
+          ls -lh output/
+          
+          if [ -z "$(ls -A output)" ]; then
+             echo "錯誤：未找到編譯出的文件！"
+             exit 1
+          fi
+
+      - name: 設定成品名稱 (僅 OpenWrt 版本)
+        id: set_name
+        run: |
+          SDK_URL="${{ inputs.sdk_url }}"
+          
+          # --- 判斷 OpenWrt 版本 ---
+          if [[ "$SDK_URL" == *"snapshots"* ]]; then
+            OP_VERSION="SNAPSHOT"
+          elif [[ "$SDK_URL" == *"releases"* ]]; then
+            # 提取版本號 (例如 24.10.5)
+            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
+          else
+            OP_VERSION="Custom"
+          fi
+          
+          echo "偵測到的版本: $OP_VERSION"
+          
+          # 設定環境變數供上傳步驟使用 (已移除 PKG_TYPE)
+          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
+
+      - name: 上傳成品
+        uses: actions/upload-artifact@v4
+        with:
+          # 最終名稱範例: luci-app-mini-diskmanager-24.10.5
+          name: luci-app-mini-diskmanager-${{ env.ARTIFACT_SUFFIX }}
+          path: output/*
