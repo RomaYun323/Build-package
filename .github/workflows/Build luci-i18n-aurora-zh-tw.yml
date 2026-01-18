@@ -1,0 +1,153 @@
+name: Build luci-i18n-aurora-config-zh-tw
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_url:
+        description: 'OpenWrt SDK URL (留空則使用預設值)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # === 設定區域 ===
+      # 預設 SDK: 這裡保留您原本的 Rockchip 連結，若需編譯 x86 或其他路由請更換此處
+      DEFAULT_SDK_URL: https://downloads.openwrt.org/releases/23.05.5/targets/rockchip/armv8/openwrt-sdk-23.05.5-rockchip-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+      # 目標插件 Git 網址
+      PKG_URL: https://github.com/eamonxg/luci-app-aurora-config.git
+      # 插件資料夾名稱 (通常與 Git 倉庫名一致)
+      PKG_NAME: luci-app-aurora-config
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          # 安裝編譯依賴與 OpenCC
+          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 file opencc zstd python3-pyelftools python3-setuptools
+
+      - name: Download and Setup SDK
+        run: |
+          SDK_LINK="${{ github.event.inputs.sdk_url }}"
+          if [ -z "$SDK_LINK" ]; then
+            SDK_LINK="$DEFAULT_SDK_URL"
+          fi
+          
+          echo "Downloading SDK from: $SDK_LINK"
+          wget "$SDK_LINK"
+          
+          SDK_FILE=$(basename "$SDK_LINK")
+          mkdir sdk
+          
+          # === 版本號提取邏輯 ===
+          if [[ "$SDK_FILE" =~ openwrt-sdk-([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            VER="${BASH_REMATCH[1]}"
+          else
+            VER="snapshot"
+          fi
+          
+          echo "Detected Version: $VER"
+          echo "OPENWRT_VERSION=$VER" >> $GITHUB_ENV
+          # ======================
+          
+          # 解壓判斷 (支援 .zst 與 .xz)
+          if [[ "$SDK_FILE" == *".zst" ]]; then
+            echo "Detected ZSTD archive..."
+            tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
+          else
+            echo "Detected XZ/GZIP archive..."
+            tar -xf "$SDK_FILE" -C sdk --strip-components=1
+          fi
+          
+          cd sdk
+          
+          # 更新 Feeds (確保依賴庫如 lua/luci-base 齊全)
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a -p luci || true
+          ./scripts/feeds install -a || true
+
+      - name: Prepare Languages (Hans & Hant)
+        working-directory: ./sdk/package
+        run: |
+          # 下載插件源碼
+          git clone $PKG_URL $PKG_NAME
+          cd $PKG_NAME/po
+          
+          echo "=== 步驟 1: 規範化簡體中文 (Base) ==="
+          # 如果只有 zh-cn，將其改名為標準的 zh_Hans 以便處理
+          if [ -d "zh-cn" ]; then
+            mv zh-cn zh_Hans
+            sed -i 's/Language: zh_CN/Language: zh_Hans/g' zh_Hans/*.po
+            sed -i 's/"Language-Team: zh_CN/"Language-Team: zh_Hans/g' zh_Hans/*.po
+          fi
+          
+          echo "=== 步驟 2: 建立繁體中文 (s2tw) ==="
+          if [ -d "zh_Hans" ]; then
+            # 複製一份作為繁體基底
+            cp -r zh_Hans zh_Hant
+            
+            # 遍歷 PO 檔進行 OpenCC 轉換
+            for file in zh_Hant/*.po; do
+              # 轉換內容
+              opencc -c s2tw.json -i "$file" -o "$file.tmp"
+              mv "$file.tmp" "$file"
+              
+              # 修正 PO 檔頭資訊 (zh_Hans -> zh_Hant)
+              sed -i 's/Language: zh_Hans/Language: zh_Hant/g' "$file"
+              sed -i 's/Language: zh_CN/Language: zh_Hant/g' "$file"
+              sed -i 's/"Language-Team: zh_Hans/"Language-Team: zh_Hant/g' "$file"
+            done
+          else
+             echo "警告: 未找到 zh_Hans 或 zh-cn 目錄，跳過語言轉換。"
+          fi
+
+      - name: Configure Build
+        working-directory: ./sdk
+        run: |
+          make defconfig
+          
+          # 關閉 u-boot 以加速並避免錯誤 (針對部分 SDK)
+          sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=y/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
+          sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=m/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
+
+          # === 設定目標插件 ===
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+          echo "CONFIG_LUCI_LANG_zh_Hant=y" >> .config
+          echo "CONFIG_PACKAGE_$PKG_NAME=m" >> .config
+          
+          make defconfig
+          
+          # === 暴力開啟語言包 (i18n) ===
+          # 注意：Aurora Config 的語言包名稱通常為 luci-i18n-aurora-config-zh-cn 等
+          # 這裡使用通配符匹配該插件的所有語言包
+          sed -i "s/# CONFIG_PACKAGE_luci-i18n-${PKG_NAME#luci-app-}-\(.*\) is not set/CONFIG_PACKAGE_luci-i18n-${PKG_NAME#luci-app-}-\1=m/g" .config
+          
+          make defconfig
+
+      - name: Compile Package
+        working-directory: ./sdk
+        run: |
+          echo "=== Start Compiling $PKG_NAME for OpenWrt ${{ env.OPENWRT_VERSION }} ==="
+          # 使用 V=s 顯示詳細日誌，失敗則單線程重試
+          make package/$PKG_NAME/compile V=s -j$(nproc) || make package/$PKG_NAME/compile V=s -j1
+
+      - name: Organize Files
+        run: |
+          mkdir -p bin-output
+          # 搜尋編譯出的 ipk (相容 apk)
+          # 包含主程式 (luci-app-...) 和語言包 (luci-i18n-...)
+          find sdk/bin/ -type f \( -name "${PKG_NAME}*.*pk" -o -name "luci-i18n-${PKG_NAME#luci-app-}*.*pk" \) -exec cp {} bin-output/ \;
+          
+          echo "=== 輸出檔案列表 ==="
+          ls -R bin-output/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # 上傳名稱帶上版本號
+          name: ${{ env.PKG_NAME }}-${{ env.OPENWRT_VERSION }}
+          path: bin-output/
