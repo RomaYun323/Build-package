@@ -58,4 +58,115 @@ jobs:
           
           PO_DIR="po"
           SRC_HANS="$PO_DIR/zh_Hans"
-          DEST_HANT="$PO_DIR/zh_Hant
+          DEST_HANT="$PO_DIR/zh_Hant"
+          LEGACY_CN="$PO_DIR/zh-cn"
+          
+          # --- 步驟 1: 強制標準化簡體中文目錄 (zh-cn -> zh_Hans) ---
+          if [ -d "$LEGACY_CN" ]; then
+            if [ -d "$SRC_HANS" ]; then
+              echo "檢測到 zh-cn 與 zh_Hans 同時存在，移除舊版 zh-cn 以避免衝突..."
+              rm -rf "$LEGACY_CN"
+            else
+              echo "檢測到舊版命名 '$LEGACY_CN'，正在重新命名為 '$SRC_HANS'..."
+              mv "$LEGACY_CN" "$SRC_HANS"
+              
+              # 修正重新命名後的檔案標頭
+              if [ -d "$SRC_HANS" ]; then
+                for file in "$SRC_HANS"/*.po; do
+                  [ -e "$file" ] || continue
+                  # [修正] 使用雙引號並移除對內部引號的匹配，避免 Bash 語法錯誤
+                  sed -i "s/Language: zh_CN/Language: zh_Hans/g" "$file"
+                  sed -i "s/Language: zh-cn/Language: zh_Hans/g" "$file"
+                done
+              fi
+            fi
+          fi
+
+          # --- 步驟 2: 檢查繁體中文是否存在，若無則生成 ---
+          if [ -d "$DEST_HANT" ]; then
+            echo "檢測到繁體中文 ($DEST_HANT) 已存在，跳過轉換。"
+          else
+            echo "未檢測到繁體中文，準備從 $SRC_HANS 生成..."
+            
+            if [ -d "$SRC_HANS" ]; then
+              mkdir -p "$DEST_HANT"
+              
+              for file in "$SRC_HANS"/*.po; do
+                [ -e "$file" ] || continue
+                filename=$(basename "$file")
+                echo "正在轉換: $filename"
+                
+                # 1. OpenCC 轉換 (s2tw: 簡體 -> 台灣正體)
+                opencc -c s2tw -i "$file" -o "$DEST_HANT/$filename"
+                
+                # 2. 修正 po 檔標頭 (Language: zh_Hans -> zh_Hant)
+                # 使用簡單的替換邏輯，避免引號嵌套問題
+                sed -i "s/Language: zh_Hans/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh_CN/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh-cn/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                
+                # 3. 常見詞彙修正
+                sed -i "s/配置文件/設定檔/g" "$DEST_HANT/$filename"
+                sed -i "s/配置/設定/g" "$DEST_HANT/$filename"
+                sed -i "s/保存/儲存/g" "$DEST_HANT/$filename"
+                sed -i "s/應用/套用/g" "$DEST_HANT/$filename"
+              done
+              echo "繁體中文生成完畢！"
+            else
+              echo "警告：找不到 $SRC_HANS (簡體來源)，無法進行轉換。"
+            fi
+          fi
+
+      - name: 更新並安裝 Feeds
+        working-directory: ./sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 配置並編譯
+        working-directory: ./sdk
+        run: |
+          make defconfig
+          
+          echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
+          make defconfig
+          
+          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
+          
+          echo "開始編譯 $PACKAGE_NAME ..."
+          make package/$PACKAGE_NAME/compile V=s -j$(nproc)
+
+      - name: 整理安裝包
+        run: |
+          mkdir -p output
+          find sdk/bin -type f -name "*temp-status*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
+          
+          echo "--- 輸出目錄內容 ---"
+          ls -lh output/
+          
+          if [ -z "$(ls -A output)" ]; then
+             echo "錯誤：未找到編譯出的文件！"
+             exit 1
+          fi
+
+      - name: 設定成品名稱
+        id: set_name
+        run: |
+          SDK_URL="${{ inputs.sdk_url }}"
+          
+          if [[ "$SDK_URL" == *"snapshots"* ]]; then
+            OP_VERSION="SNAPSHOT"
+          elif [[ "$SDK_URL" == *"releases"* ]]; then
+            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
+          else
+            OP_VERSION="Custom"
+          fi
+          
+          echo "偵測到的版本: $OP_VERSION"
+          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
+
+      - name: 上傳成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
+          path: output/*
