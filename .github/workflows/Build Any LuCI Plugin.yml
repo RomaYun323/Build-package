@@ -1,19 +1,16 @@
-name: Build Any LuCI Plugin (Auto-Detect)
+name: Build luci-app-temp-status
 
 on:
   workflow_dispatch:
     inputs:
-      repo_url:
-        description: '插件 Git 倉庫地址 (必填)'
-        required: true
-        default: 'https://github.com/gSpotx2f/luci-app-temp-status.git'
       sdk_url:
-        description: 'OpenWrt SDK 下載地址'
+        description: 'OpenWrt SDK 下載地址 (.tar.zst)'
         required: true
         default: 'https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
 
 env:
-  TZ: Asia/Taipei
+  PLUGIN_REPO: "https://github.com/gSpotx2f/luci-app-temp-status.git"
+  PACKAGE_NAME: "luci-app-temp-status"
 
 jobs:
   build:
@@ -45,124 +42,85 @@ jobs:
           tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
           rm -f "$SDK_FILE"
 
-      - name: 下載插件並自動提取名稱
+      - name: 下載插件原始碼
         working-directory: ./sdk/package
         run: |
-          REPO_URL="${{ inputs.repo_url }}"
-          git clone "$REPO_URL"
-          
-          # 從 URL 提取倉庫名稱作為預設 PACKAGE_NAME
-          PKG_NAME=$(basename "$REPO_URL" .git)
-          echo "偵測到的插件名稱: $PKG_NAME"
-          echo "PACKAGE_NAME=$PKG_NAME" >> $GITHUB_ENV
+          git clone "$PLUGIN_REPO"
 
       - name: 標準化語言包並轉換繁體 (OpenCC)
         working-directory: ./sdk/package
         run: |
-          # ------------------------------------------------------------------
-          # 1. 智能目錄搜尋 (處理二級目錄問題)
-          # ------------------------------------------------------------------
-          echo "正在搜尋插件真實路徑 (Target: $PACKAGE_NAME)..."
+          # 尋找插件目錄
+          PKG_DIR=$(find . -maxdepth 1 -type d -name "*temp-status*" | head -n 1)
+          if [ -z "$PKG_DIR" ]; then echo "錯誤：找不到插件目錄"; exit 1; fi
+          cd "$PKG_DIR"
+          echo "進入目錄: $(pwd)"
           
-          # 先找出剛 Clone 下來的最外層目錄
-          CLONE_DIR=$(find . -maxdepth 1 -type d -name "*$PACKAGE_NAME*" | head -n 1)
-          if [ -z "$CLONE_DIR" ]; then echo "錯誤：Git Clone 失敗或找不到目錄"; exit 1; fi
-          
-          cd "$CLONE_DIR"
-          echo "進入 Clone 根目錄: $(pwd)"
-          
-          # 判斷 Makefile 位置
-          if [ -f "Makefile" ]; then
-             PKG_REAL_DIR="."
-          else
-             # 遞迴搜尋含有 Makefile 的子目錄
-             PKG_REAL_DIR=$(find . -type d -name "*$PACKAGE_NAME*" -exec test -f "{}/Makefile" \; -print -quit)
-             # 若依名稱找不到，嘗試搜尋任意含有 Makefile 的目錄 (排除 src)
-             if [ -z "$PKG_REAL_DIR" ]; then
-                PKG_REAL_DIR=$(find . -maxdepth 2 -type d -not -name "src" -exec test -f "{}/Makefile" \; -print -quit)
-             fi
-          fi
-          
-          if [ -z "$PKG_REAL_DIR" ]; then echo "錯誤：無法定位包含 Makefile 的插件目錄！"; exit 1; fi
-          
-          cd "$PKG_REAL_DIR"
-          echo ">>> 最終鎖定插件目錄: $(pwd)"
-
-          # ------------------------------------------------------------------
-          # 2. 語言包處理邏輯 (標準化 -> 檢測 -> 轉換)
-          # ------------------------------------------------------------------
           PO_DIR="po"
-          TARGET_HANS="$PO_DIR/zh_Hans"
-          TARGET_HANT="$PO_DIR/zh_Hant"
-
-          # [步驟 A] 標準化目錄名稱 (Normalize)
-          # 目的：將 zh-cn, zh_CN -> zh_Hans；將 zh-tw, zh_TW -> zh_Hant
+          SRC_HANS="$PO_DIR/zh_Hans"
+          DEST_HANT="$PO_DIR/zh_Hant"
+          LEGACY_CN="$PO_DIR/zh-cn"
           
-          # 處理簡體
-          for legacy in "$PO_DIR/zh-cn" "$PO_DIR/zh_CN" "$PO_DIR/zh_cn"; do
-            if [ -d "$legacy" ]; then
-              if [ -d "$TARGET_HANS" ]; then
-                echo "移除重複的舊版簡體目錄: $legacy"
-                rm -rf "$legacy"
-              else
-                echo "標準化簡體命名: $legacy -> $TARGET_HANS"
-                mv "$legacy" "$TARGET_HANS"
-                # 修正 po 檔內的 Header
-                find "$TARGET_HANS" -name "*.po" -exec sed -i 's/"Language: zh_CN/"Language: zh_Hans/g' {} +
-                find "$TARGET_HANS" -name "*.po" -exec sed -i 's/"Language: zh-cn/"Language: zh_Hans/g' {} +
-              fi
-            fi
-          done
-
-          # 處理繁體
-          for legacy in "$PO_DIR/zh-tw" "$PO_DIR/zh_TW" "$PO_DIR/zh_tw"; do
-            if [ -d "$legacy" ]; then
-              if [ -d "$TARGET_HANT" ]; then
-                echo "移除重複的舊版繁體目錄: $legacy"
-                rm -rf "$legacy"
-              else
-                echo "標準化繁體命名: $legacy -> $TARGET_HANT"
-                mv "$legacy" "$TARGET_HANT"
-                # 修正 po 檔內的 Header
-                find "$TARGET_HANT" -name "*.po" -exec sed -i 's/"Language: zh_TW/"Language: zh_Hant/g' {} +
-                find "$TARGET_HANT" -name "*.po" -exec sed -i 's/"Language: zh-tw/"Language: zh_Hant/g' {} +
-              fi
-            fi
-          done
-
-          # [步驟 B] 檢測繁體是否存在，若不存在則由簡體轉換
-          if [ -d "$TARGET_HANT" ]; then
-            echo ">>> 檢測到 zh_Hant 已存在 (包含由 zh-tw 標準化而來的)，跳過轉換。"
-          else
-            if [ -d "$TARGET_HANS" ]; then
-              echo ">>> 未檢測到 zh_Hant，正在從 zh_Hans 轉換..."
-              mkdir -p "$TARGET_HANT"
+          # --- 步驟 1: 強制標準化簡體中文目錄 (zh-cn -> zh_Hans) ---
+          # 這是關鍵：必須先確保來源目錄名稱正確，後續轉換與編譯才能識別
+          if [ -d "$LEGACY_CN" ]; then
+            if [ -d "$SRC_HANS" ]; then
+              echo "檢測到 zh-cn 與 zh_Hans 同時存在，移除舊版 zh-cn 以避免衝突..."
+              rm -rf "$LEGACY_CN"
+            else
+              echo "檢測到舊版命名 '$LEGACY_CN'，正在重新命名為 '$SRC_HANS'..."
+              mv "$LEGACY_CN" "$SRC_HANS"
               
-              for file in "$TARGET_HANS"/*.po; do
+              if [ -d "$SRC_HANS" ]; then
+                for file in "$SRC_HANS"/*.po; do
+                  [ -e "$file" ] || continue
+                  # 修正 po 檔內部的標頭
+                  sed -i "s/Language: zh_CN/Language: zh_Hans/g" "$file"
+                  sed -i "s/Language: zh-cn/Language: zh_Hans/g" "$file"
+                done
+              fi
+            fi
+          fi
+
+          # --- 步驟 2: 檢查繁體中文是否存在，若無則生成 ---
+          if [ -d "$DEST_HANT" ]; then
+            echo "檢測到繁體中文 ($DEST_HANT) 已存在，跳過轉換。"
+          else
+            echo "未檢測到繁體中文，準備從 $SRC_HANS 生成..."
+            
+            if [ -d "$SRC_HANS" ]; then
+              mkdir -p "$DEST_HANT"
+              
+              for file in "$SRC_HANS"/*.po; do
                 [ -e "$file" ] || continue
                 filename=$(basename "$file")
+                echo "正在轉換: $filename"
                 
-                # OpenCC 轉換 (簡 -> 繁)
-                opencc -c s2tw -i "$file" -o "$TARGET_HANT/$filename"
+                # OpenCC 轉換 (簡體 -> 台灣繁體)
+                opencc -c s2tw -i "$file" -o "$DEST_HANT/$filename"
                 
-                # 修正 Header (Hans -> Hant)
-                sed -i 's/"Language: zh_Hans/"Language: zh_Hant/g' "$TARGET_HANT/$filename"
+                # 修正 po 檔標頭
+                sed -i "s/Language: zh_Hans/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh_CN/Language: zh_Hant/g" "$DEST_HANT/$filename"
+                sed -i "s/Language: zh-cn/Language: zh_Hant/g" "$DEST_HANT/$filename"
                 
-                # 詞彙潤飾 (可選)
-                sed -i "s/配置文件/設定檔/g" "$TARGET_HANT/$filename"
-                sed -i "s/配置/設定/g" "$TARGET_HANT/$filename"
-                sed -i "s/保存/儲存/g" "$TARGET_HANT/$filename"
-                sed -i "s/應用/套用/g" "$TARGET_HANT/$filename"
+                # 詞彙修正
+                sed -i "s/配置文件/設定檔/g" "$DEST_HANT/$filename"
+                sed -i "s/配置/設定/g" "$DEST_HANT/$filename"
+                sed -i "s/保存/儲存/g" "$DEST_HANT/$filename"
+                sed -i "s/應用/套用/g" "$DEST_HANT/$filename"
+                sed -i "s/启用/啟用/g" "$DEST_HANT/$filename"
               done
-              echo ">>> 轉換完成！"
+              echo "繁體中文生成完畢！"
             else
-              echo ">>> 提示：找不到 zh_Hans 來源，無法進行轉換。"
+              echo "警告：找不到 $SRC_HANS (簡體來源)，無法進行轉換。"
             fi
           fi
 
       - name: 更新並安裝 Feeds
         working-directory: ./sdk
         run: |
+          # 必須在原始碼修改完成後執行，這樣 feeds 才會掃描到新生成的 po 目錄
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -170,8 +128,23 @@ jobs:
         working-directory: ./sdk
         run: |
           make defconfig
+          
+          # --- 設定編譯選項 ---
+          # 1. 開啟主程式
           echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
+          
+          # 2. 強制開啟語言包 (解決不生成語言包的關鍵步驟)
+          # OpenWrt 對於 po/zh_Hans 目錄會自動註冊 luci-i18n-*-zh-hans
+          # 對於 po/zh_Hant 目錄會自動註冊 luci-i18n-*-zh-hant
+          echo "CONFIG_PACKAGE_luci-i18n-temp-status-zh-hans=m" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-temp-status-zh-hant=m" >> .config
+          
+          # 應用設定
           make defconfig
+          
+          # 檢查設定是否生效 (除錯用)
+          echo "--- 檢查 .config 中的 i18n 設定 ---"
+          grep "CONFIG_PACKAGE_luci-i18n-temp-status" .config || echo "警告：未找到語言包設定！"
           
           echo "開始編譯 $PACKAGE_NAME ..."
           make package/$PACKAGE_NAME/compile V=s -j$(nproc)
@@ -179,4 +152,64 @@ jobs:
       - name: 整理並重新命名安裝包
         run: |
           mkdir -p output
-          find sdk/bin -type f -name "*$PACKAGE_NAME*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp
+          # 複製 ipk 檔案
+          find sdk/bin -type f -name "*temp-status*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
+          
+          if [ -z "$(ls -A output)" ]; then
+             echo "錯誤：未找到編譯出的文件！"
+             exit 1
+          fi
+
+          echo "--- 開始執行重命名 ---"
+          cd output
+          for file in *; do
+            [ -f "$file" ] || continue
+            filename=$(basename "$file")
+            
+            # 僅處理包含 "i18n" 的檔案
+            if [[ "$filename" == *"i18n"* ]]; then
+                ext="${filename##*.}"
+                base_no_ext="${filename%.*}"
+                
+                # 取得架構 (最後一個底線後的內容)
+                arch="${base_no_ext##*_}"
+                
+                # 取得 名稱+版本 (移除架構)
+                name_and_ver="${base_no_ext%_*}"
+                
+                # 取得 名稱 (移除版本 -> 移除最後一個底線後的內容)
+                name="${name_and_ver%_*}"
+                
+                # 重組新名稱 (版本號強制為 0)
+                new_filename="${name}_0_${arch}.${ext}"
+                
+                if [[ "$filename" != "$new_filename" ]]; then
+                    echo "i18n 重命名: $filename -> $new_filename"
+                    mv "$filename" "$new_filename"
+                fi
+            else
+                echo "主程式檔案，保留原名: $filename"
+            fi
+          done
+          
+          echo "--- 最終輸出目錄內容 ---"
+          ls -lh
+
+      - name: 設定成品名稱
+        id: set_name
+        run: |
+          SDK_URL="${{ inputs.sdk_url }}"
+          if [[ "$SDK_URL" == *"snapshots"* ]]; then
+            OP_VERSION="SNAPSHOT"
+          elif [[ "$SDK_URL" == *"releases"* ]]; then
+            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
+          else
+            OP_VERSION="Custom"
+          fi
+          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
+
+      - name: 上傳成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
+          path: output/*
