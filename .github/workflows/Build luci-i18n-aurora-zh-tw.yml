@@ -1,4 +1,4 @@
-name: Build luci-i18n-aurora-config-zh-tw
+name: Build luci-app-aurora-config-zh-tw
 
 on:
   workflow_dispatch:
@@ -6,14 +6,17 @@ on:
       sdk_url:
         description: 'OpenWrt SDK URL (留空則使用預設值)'
         required: false
+        # 這裡已更新為您指定的 24.10.4 連結
         default: 'https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 固定使用 Ubuntu 22.04 以確保編譯環境穩定
+    runs-on: ubuntu-22.04
+    
     env:
       # === 設定區域 ===
-      # 預設 SDK: 這裡保留您原本的 Rockchip 連結，若需編譯 x86 或其他路由請更換此處
+      # 預設 SDK (雙重保險，確保環境變數也是新的連結)
       DEFAULT_SDK_URL: https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst
       # 目標插件 Git 網址
       PKG_URL: https://github.com/eamonxg/luci-app-aurora-config.git
@@ -27,7 +30,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          # 安裝編譯依賴與 OpenCC
+          # 安裝編譯依賴與 OpenCC，包含 zstd 用於解壓新版 SDK
           sudo apt-get install -y build-essential libncurses5-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 file opencc zstd python3-pyelftools python3-setuptools
 
       - name: Download and Setup SDK
@@ -65,7 +68,7 @@ jobs:
           
           cd sdk
           
-          # 更新 Feeds (確保依賴庫如 lua/luci-base 齊全)
+          # 更新 Feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a -p luci || true
           ./scripts/feeds install -a || true
@@ -78,7 +81,6 @@ jobs:
           cd $PKG_NAME/po
           
           echo "=== 步驟 1: 規範化簡體中文 (Base) ==="
-          # 如果只有 zh-cn，將其改名為標準的 zh_Hans 以便處理
           if [ -d "zh-cn" ]; then
             mv zh-cn zh_Hans
             sed -i 's/Language: zh_CN/Language: zh_Hans/g' zh_Hans/*.po
@@ -96,7 +98,7 @@ jobs:
               opencc -c s2tw.json -i "$file" -o "$file.tmp"
               mv "$file.tmp" "$file"
               
-              # 修正 PO 檔頭資訊 (zh_Hans -> zh_Hant)
+              # 修正 PO 檔頭資訊
               sed -i 's/Language: zh_Hans/Language: zh_Hant/g' "$file"
               sed -i 's/Language: zh_CN/Language: zh_Hant/g' "$file"
               sed -i 's/"Language-Team: zh_Hans/"Language-Team: zh_Hant/g' "$file"
@@ -110,7 +112,7 @@ jobs:
         run: |
           make defconfig
           
-          # 關閉 u-boot 以加速並避免錯誤 (針對部分 SDK)
+          # 關閉 u-boot (針對 Rockchip 等容易出錯的依賴)
           sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=y/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
           sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=m/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
 
@@ -122,8 +124,6 @@ jobs:
           make defconfig
           
           # === 暴力開啟語言包 (i18n) ===
-          # 注意：Aurora Config 的語言包名稱通常為 luci-i18n-aurora-config-zh-cn 等
-          # 這裡使用通配符匹配該插件的所有語言包
           sed -i "s/# CONFIG_PACKAGE_luci-i18n-${PKG_NAME#luci-app-}-\(.*\) is not set/CONFIG_PACKAGE_luci-i18n-${PKG_NAME#luci-app-}-\1=m/g" .config
           
           make defconfig
@@ -132,14 +132,12 @@ jobs:
         working-directory: ./sdk
         run: |
           echo "=== Start Compiling $PKG_NAME for OpenWrt ${{ env.OPENWRT_VERSION }} ==="
-          # 使用 V=s 顯示詳細日誌，失敗則單線程重試
           make package/$PKG_NAME/compile V=s -j$(nproc) || make package/$PKG_NAME/compile V=s -j1
 
       - name: Organize Files
         run: |
           mkdir -p bin-output
-          # 搜尋編譯出的 ipk (相容 apk)
-          # 包含主程式 (luci-app-...) 和語言包 (luci-i18n-...)
+          # 搜尋 ipk
           find sdk/bin/ -type f \( -name "${PKG_NAME}*.*pk" -o -name "luci-i18n-${PKG_NAME#luci-app-}*.*pk" \) -exec cp {} bin-output/ \;
           
           echo "=== 輸出檔案列表 ==="
@@ -148,6 +146,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          # 上傳名稱帶上版本號
           name: ${{ env.PKG_NAME }}-${{ env.OPENWRT_VERSION }}
           path: bin-output/
