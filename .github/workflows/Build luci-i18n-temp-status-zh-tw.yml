@@ -1,135 +1,163 @@
-name: Build luci-i18n-temp-status-zh-tw
+name: Build luci-app-temp-status
 
 on:
   workflow_dispatch:
     inputs:
       sdk_url:
-        description: 'OpenWrt SDK URL (Optional, defaults to env)'
-        required: false
+        description: 'OpenWrt SDK 下載地址 (.tar.zst)'
+        required: true
         default: 'https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst'
+
+env:
+  PLUGIN_REPO: "https://github.com/gSpotx2f/luci-app-temp-status.git"
+  PACKAGE_NAME: "luci-app-temp-status"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    env:
-      # 預設 SDK (可在此更換)
-      DEFAULT_SDK_URL: https://downloads.openwrt.org/releases/24.10.5/targets/rockchip/armv8/openwrt-sdk-24.10.5-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-      PKG_URL: https://github.com/gSpotx2f/luci-app-temp-status.git
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: 初始化環境
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: 安裝編譯依賴與 OpenCC
         run: |
           sudo apt-get update
-          # 包含 python3-pyelftools 修復 u-boot 錯誤，zstd 修復新版解壓
-          sudo apt-get install -y build-essential libncurses5-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 file opencc zstd python3-pyelftools python3-setuptools
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget zstd \
+            ccache ecj fastjar libelf-dev xsltproc python3-pyelftools \
+            opencc
 
-      - name: Download and Setup SDK
+      - name: 下載並解壓 SDK
         run: |
-          SDK_LINK="${{ github.event.inputs.sdk_url }}"
-          if [ -z "$SDK_LINK" ]; then
-            SDK_LINK="$DEFAULT_SDK_URL"
-          fi
+          SDK_URL="${{ inputs.sdk_url }}"
+          SDK_FILE=$(basename "$SDK_URL")
           
-          echo "Downloading SDK from: $SDK_LINK"
-          wget "$SDK_LINK"
+          echo "正在下載 SDK: $SDK_FILE"
+          wget -qO "$SDK_FILE" "$SDK_URL"
           
-          SDK_FILE=$(basename "$SDK_LINK")
+          echo "正在解壓 SDK..."
           mkdir sdk
-          
-          # === 版本號提取邏輯 ===
-          # 嘗試匹配類似 23.05.5 的版本號
-          if [[ "$SDK_FILE" =~ openwrt-sdk-([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-            VER="${BASH_REMATCH[1]}"
-          else
-            # 如果匹配不到數字版本，通常是 snapshot 或其他命名
-            VER="snapshot"
-          fi
-          
-          echo "Detected Version: $VER"
-          echo "OPENWRT_VERSION=$VER" >> $GITHUB_ENV
-          # ======================
-          
-          # 解壓判斷
-          if [[ "$SDK_FILE" == *".zst" ]]; then
-            echo "Detected ZSTD archive..."
-            tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
-          else
-            echo "Detected XZ/GZIP archive..."
-            tar -xf "$SDK_FILE" -C sdk --strip-components=1
-          fi
-          
-          cd sdk
-          
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a -p luci || true
-          ./scripts/feeds install -a || true
+          tar -I zstd -xf "$SDK_FILE" -C sdk --strip-components=1
+          rm -f "$SDK_FILE"
 
-      - name: Prepare Languages (Hans & Hant)
+      - name: 下載插件原始碼
         working-directory: ./sdk/package
         run: |
-          git clone $PKG_URL luci-app-temp-status
-          cd luci-app-temp-status/po
+          git clone "$PLUGIN_REPO"
+
+      - name: 檢測並自動生成繁體中文 (OpenCC)
+        working-directory: ./sdk/package
+        run: |
+          # 尋找插件目錄
+          PKG_DIR=$(find . -maxdepth 1 -type d -name "*temp-status*" | head -n 1)
+          if [ -z "$PKG_DIR" ]; then echo "錯誤：找不到插件目錄"; exit 1; fi
+          cd "$PKG_DIR"
+
+          echo "進入目錄: $(pwd)"
           
-          echo "=== 步驟 1: 處理簡體中文 (Base) ==="
-          if [ -d "zh-cn" ]; then
-            mv zh-cn zh_Hans
-            sed -i 's/Language: zh_CN/Language: zh_Hans/g' zh_Hans/*.po
-            sed -i 's/"Language-Team: zh_CN/"Language-Team: zh_Hans/g' zh_Hans/*.po
-          fi
-          
-          echo "=== 步驟 2: 建立繁體中文 (New) ==="
-          if [ -d "zh_Hans" ]; then
-            cp -r zh_Hans zh_Hant
+          PO_DIR="po"
+          SRC_HANS="$PO_DIR/zh_Hans"
+          DEST_HANT="$PO_DIR/zh_Hant"
+          SRC_CN="$PO_DIR/zh-cn"
+          DEST_TW="$PO_DIR/zh-tw"
+
+          if [ -d "$DEST_HANT" ] || [ -d "$DEST_TW" ]; then
+            echo "檢測到已存在繁體中文語言包，跳過轉換。"
+          else
+            echo "未檢測到繁體中文，尋找簡體中文來源..."
             
-            for file in zh_Hant/*.po; do
-              opencc -c s2tw.json -i "$file" -o "$file.tmp"
-              mv "$file.tmp" "$file"
-              sed -i 's/Language: zh_Hans/Language: zh_Hant/g' "$file"
-              sed -i 's/Language: zh_CN/Language: zh_Hant/g' "$file"
-              sed -i 's/"Language-Team: zh_Hans/"Language-Team: zh_Hant/g' "$file"
-            done
+            if [ -d "$SRC_HANS" ]; then
+              SRC="$SRC_HANS"
+              DEST="$DEST_HANT"
+              LANG_CODE="zh_Hant"
+            elif [ -d "$SRC_CN" ]; then
+              SRC="$SRC_CN"
+              DEST="$DEST_TW"
+              LANG_CODE="zh_TW"
+            else
+              echo "警告：也找不到簡體中文語言包，無法轉換 (將編譯英文版)。"
+              # 這裡不退出 exit 0，讓流程繼續，因為可以只編譯英文版
+            fi
+            
+            if [ -n "$SRC" ]; then
+              echo "發現來源: $SRC"
+              echo "準備轉換至: $DEST"
+              mkdir -p "$DEST"
+              
+              for file in "$SRC"/*.po; do
+                [ -e "$file" ] || continue
+                filename=$(basename "$file")
+                
+                # OpenCC 轉換 (s2tw: 簡體 -> 台灣正體)
+                opencc -c s2tw -i "$file" -o "$DEST/$filename"
+                
+                # 修正 po 檔標頭與用語
+                sed -i "s/zh_Hans/$LANG_CODE/g" "$DEST/$filename"
+                sed -i "s/zh_CN/$LANG_CODE/g" "$DEST/$filename"
+                sed -i "s/zh-cn/$LANG_CODE/g" "$DEST/$filename"
+                
+                # 簡單的詞彙修正
+                sed -i 's/配置文件/設定檔/g' "$DEST/$filename"
+                sed -i 's/配置/設定/g' "$DEST/$filename"
+                sed -i 's/保存/儲存/g' "$DEST/$filename"
+              done
+              echo "繁體中文轉換完成！"
+            fi
           fi
 
-      - name: Configure Build
+      - name: 更新並安裝 Feeds
+        working-directory: ./sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 配置並編譯
         working-directory: ./sdk
         run: |
           make defconfig
           
-          # 關閉 u-boot 以加速並避免錯誤
-          sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=y/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
-          sed -i 's/CONFIG_PACKAGE_uboot-rockchip.*=m/# CONFIG_PACKAGE_uboot-rockchip is not set/' .config
-
-          # 設定插件
-          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          echo "CONFIG_LUCI_LANG_zh_Hant=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-temp-status=m" >> .config
-          
+          echo "CONFIG_PACKAGE_$PACKAGE_NAME=m" >> .config
           make defconfig
           
-          # 暴力開啟語言包
-          sed -i 's/# CONFIG_PACKAGE_luci-i18n-temp-status-\(.*\) is not set/CONFIG_PACKAGE_luci-i18n-temp-status-\1=m/g' .config
+          grep "CONFIG_PACKAGE_$PACKAGE_NAME=m" .config || { echo "錯誤：配置未生效"; exit 1; }
           
-          make defconfig
+          echo "開始編譯 $PACKAGE_NAME ..."
+          make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
-      - name: Compile Package
-        working-directory: ./sdk
+      - name: 整理安裝包
         run: |
-          echo "=== Start Compiling for OpenWrt ${{ env.OPENWRT_VERSION }} ==="
-          make package/luci-app-temp-status/compile V=s -j$(nproc) || make package/luci-app-temp-status/compile V=s -j1
+          mkdir -p output
+          # 搜尋包含 temp-status 的 ipk 文件
+          find sdk/bin -type f -name "*temp-status*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
+          
+          echo "--- 輸出目錄內容 ---"
+          ls -lh output/
+          
+          if [ -z "$(ls -A output)" ]; then
+             echo "錯誤：未找到編譯出的文件！"
+             exit 1
+          fi
 
-      - name: Organize Files
+      - name: 設定成品名稱
+        id: set_name
         run: |
-          mkdir -p bin-output
-          # 支援 ipk (舊版) 和 apk (新版)
-          find sdk/bin/ -type f \( -name "luci-app-temp-status*.*pk" -o -name "luci-i18n-temp-status*.*pk" \) -exec cp {} bin-output/ \;
-          ls -R bin-output/
+          SDK_URL="${{ inputs.sdk_url }}"
+          
+          if [[ "$SDK_URL" == *"snapshots"* ]]; then
+            OP_VERSION="SNAPSHOT"
+          elif [[ "$SDK_URL" == *"releases"* ]]; then
+            OP_VERSION=$(echo "$SDK_URL" | awk -F'/releases/' '{print $2}' | awk -F'/' '{print $1}')
+          else
+            OP_VERSION="Custom"
+          fi
+          
+          echo "偵測到的版本: $OP_VERSION"
+          echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
 
-      - name: Upload Artifact
+      - name: 上傳成品
         uses: actions/upload-artifact@v4
         with:
-          # 修改這裡：在名稱後加上版本號
-          name: luci-app-temp-status-${{ env.OPENWRT_VERSION }}
-          path: bin-output/
+          name: ${{ env.PACKAGE_NAME }}-${{ env.ARTIFACT_SUFFIX }}
+          path: output/*
