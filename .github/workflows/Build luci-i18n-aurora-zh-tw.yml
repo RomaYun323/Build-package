@@ -51,69 +51,65 @@ jobs:
       - name: 檢測並自動生成繁體中文 (OpenCC)
         working-directory: ./sdk/package
         run: |
-          # 進入插件目錄 (假設只有一個 clone 下來的資料夾)
+          # 1. 進入插件目錄
           PKG_DIR=$(find . -maxdepth 1 -type d -name "*aurora-config*" | head -n 1)
           if [ -z "$PKG_DIR" ]; then echo "錯誤：找不到插件目錄"; exit 1; fi
           cd "$PKG_DIR"
-
           echo "進入目錄: $(pwd)"
-          
-          # 定義路徑變數
+
           PO_DIR="po"
           
-          # 定義常見的簡體與繁體目錄名稱
-          SRC_HANS="$PO_DIR/zh_Hans"
-          DEST_HANT="$PO_DIR/zh_Hant"
-          
-          # 備用方案 (舊式命名)
-          SRC_CN="$PO_DIR/zh-cn"
-          DEST_TW="$PO_DIR/zh-tw"
+          # 如果沒有 po 目錄，直接結束
+          if [ ! -d "$PO_DIR" ]; then
+            echo "警告：未找到 po 目錄，跳過翻譯處理。"
+            exit 0
+          fi
 
-          # 檢查邏輯
-          if [ -d "$DEST_HANT" ] || [ -d "$DEST_TW" ]; then
-            echo "檢測到已存在繁體中文語言包，跳過轉換。"
-          else
-            echo "未檢測到繁體中文，尋找簡體中文來源..."
-            
-            if [ -d "$SRC_HANS" ]; then
-              SRC="$SRC_HANS"
-              DEST="$DEST_HANT"
-              LANG_CODE="zh_Hant"
-            elif [ -d "$SRC_CN" ]; then
-              SRC="$SRC_CN"
-              DEST="$DEST_TW"
-              LANG_CODE="zh_TW"
-            else
-              echo "警告：也找不到簡體中文語言包，無法轉換。"
-              exit 0
-            fi
-            
-            echo "發現來源: $SRC"
-            echo "準備轉換至: $DEST"
-            
-            mkdir -p "$DEST"
-            
-            # 遍歷 .po 檔案進行轉換
-            for file in "$SRC"/*.po; do
+          # --- 步驟 1: 規範化來源目錄名稱 (zh-cn -> zh_Hans) ---
+          if [ -d "$PO_DIR/zh-cn" ] && [ ! -d "$PO_DIR/zh_Hans" ]; then
+            echo "檢測到非標準命名：將 po/zh-cn 重命名為 po/zh_Hans"
+            mv "$PO_DIR/zh-cn" "$PO_DIR/zh_Hans"
+          fi
+
+          # --- 步驟 2: 檢測繁體中文是否存在 ---
+          if [ -d "$PO_DIR/zh_Hant" ]; then
+            echo "檢測到已存在 zh_Hant 目錄，跳過轉換。"
+            exit 0
+          fi
+          if [ -d "$PO_DIR/zh-tw" ]; then
+            echo "檢測到已存在 zh-tw 目錄，跳過轉換。"
+            exit 0
+          fi
+
+          # --- 步驟 3: 若不存在繁體，則由簡體轉換 (zh_Hans -> zh_Hant) ---
+          if [ -d "$PO_DIR/zh_Hans" ]; then
+            echo "未檢測到繁體中文，準備從 zh_Hans 轉換..."
+            mkdir -p "$PO_DIR/zh_Hant"
+
+            for file in "$PO_DIR/zh_Hans"/*.po; do
               [ -e "$file" ] || continue
               filename=$(basename "$file")
               echo "正在轉換: $filename"
+
+              # A. 使用 OpenCC 轉換 (s2tw: 簡體 -> 台灣正體)
+              opencc -c s2tw -i "$file" -o "$PO_DIR/zh_Hant/$filename"
+
+              # B. 修正 .po 標頭與語言代碼
+              sed -i 's/zh_Hans/zh_Hant/g' "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/zh_CN/zh_Hant/g'   "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/zh-cn/zh_Hant/g'   "$PO_DIR/zh_Hant/$filename"
               
-              # 1. 使用 OpenCC s2tw (簡體 -> 臺灣正體)
-              opencc -c s2tw -i "$file" -o "$DEST/$filename"
-              
-              # 2. 修正 .po 檔內的 Language 標頭與常見詞彙
-              # 替換 zh_Hans/zh-cn 為對應的繁體代碼
-              sed -i "s/zh_Hans/$LANG_CODE/g" "$DEST/$filename"
-              sed -i "s/zh_CN/$LANG_CODE/g" "$DEST/$filename"
-              sed -i "s/zh-cn/$LANG_CODE/g" "$DEST/$filename"
-              
-              # 額外修正：OpenCC有時會保留 "配置文件" 這種用法，可手動修正為 "設定檔" (可選)
-              sed -i 's/配置文件/設定檔/g' "$DEST/$filename"
-              sed -i 's/配置/設定/g' "$DEST/$filename"
+              # C. 術語修正 (OpenWrt/LuCI 常見用語)
+              sed -i 's/配置文件/設定檔/g' "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/配置/設定/g'      "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/保存/儲存/g'      "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/应用/套用/g'      "$PO_DIR/zh_Hant/$filename"
+              sed -i 's/启用/啟用/g'      "$PO_DIR/zh_Hant/$filename"
             done
-            
+
             echo "轉換完成！"
+          else
+            echo "警告：同時找不到繁體目標與簡體來源 (zh_Hans)，無法轉換。"
           fi
 
       - name: 更新並安裝 Feeds
@@ -135,20 +131,39 @@ jobs:
           echo "開始編譯 $PACKAGE_NAME ..."
           make package/$PACKAGE_NAME/compile V=s -j$(nproc)
 
-      - name: 整理安裝包
+      - name: 整理並重命名安裝包
         run: |
           mkdir -p output
-          find sdk/bin -type f -name "*aurora-config*" \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} output/ \;
           
-          echo "--- 輸出目錄內容 ---"
+          # 遍歷 sdk/bin 下所有符合條件的 ipk 與 apk 文件
+          find sdk/bin -type f -name "*aurora-config*" \( -name "*.ipk" -o -name "*.apk" \) | while read -r filepath; do
+            filename=$(basename "$filepath")
+            ext="${filename##*.}"
+            
+            if [[ "$ext" == "ipk" ]]; then
+              # IPK 規則: name_version_arch.ipk -> name_0_arch.ipk
+              # 例如: luci-i18n-aurora-config-en_25.198..._all.ipk -> luci-i18n-aurora-config-en_0_all.ipk
+              new_filename=$(echo "$filename" | sed -E 's/^(.*)_([^_]+)_([^_]+\.ipk)$/\1_0_\3/')
+              
+            elif [[ "$ext" == "apk" ]]; then
+              # APK 規則: name-version.apk -> name-0.apk
+              # 例如: luci-i18n-aurora-config-en-25.198....apk -> luci-i18n-aurora-config-en-0.apk
+              new_filename=$(echo "$filename" | sed -E 's/^(.*)-([^-]+)\.apk$/\1-0.apk/')
+            fi
+            
+            echo "複製並重命名: $filename -> $new_filename"
+            cp "$filepath" "output/$new_filename"
+          done
+          
+          echo "--- 輸出目錄最終內容 ---"
           ls -lh output/
           
           if [ -z "$(ls -A output)" ]; then
-             echo "錯誤：未找到編譯出的文件！"
-             exit 1
+              echo "錯誤：未找到編譯出的文件！"
+              exit 1
           fi
 
-      - name: 設定成品名稱
+      - name: 設定成品標識
         id: set_name
         run: |
           SDK_URL="${{ inputs.sdk_url }}"
@@ -161,7 +176,7 @@ jobs:
             OP_VERSION="Custom"
           fi
           
-          echo "偵測到的版本: $OP_VERSION"
+          echo "偵測到的 SDK 版本: $OP_VERSION"
           echo "ARTIFACT_SUFFIX=$OP_VERSION" >> $GITHUB_ENV
 
       - name: 上傳成品
