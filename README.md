@@ -11,3 +11,4 @@
 | [openwrt-bandix](https://github.com/timsaya/openwrt-bandix) | 流量監控 |  |  |
 | [luci-app-bandix](https://github.com/timsaya/luci-app-bandix) | 流量監控前端 |  |  |
 | [luci-theme-alpha](https://github.com/derisamedia/luci-theme-alpha) | 主題 |  |  |
+| [luci-theme-alpha-reborn](https://github.com/derisamedia/luci-theme-alpha-reborn) | 主題 |  |  |
