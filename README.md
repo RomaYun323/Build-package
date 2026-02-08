@@ -4,7 +4,7 @@
 | 插件  | 用途 | Actions | 備註 |
 | ------------- | ------------- | :-----------: | ------------- |
 | [luci-theme-aurora](https://github.com/eamonxg/luci-theme-aurora)  | 主題 |  |  |
-| [luci-app-aurora-config](https://github.com/eamonxg/luci-app-aurora-config) | 主題設置 |  | 升級恢復系統備份可免安裝 |
+| [luci-app-aurora-config](https://github.com/eamonxg/luci-app-aurora-config) | 主題設置 |  |  |
 | [luci-app-mini-diskmanager](https://github.com/4IceG/luci-app-mini-diskmanager) | 分區擴容 |  | [擴容教學](https://github.com/RomaYun323/OpenWrt/blob/main/Luci-app-mini-diskmanager%E6%93%B4%E5%AE%B9.md) |
 | [luci-app-temp-status](https://github.com/gSpotx2f/luci-app-temp-status ) | 顯示溫度 | [&#x2705;](https://github.com/RomaYun323/Build-package/actions/workflows/Build%20luci-i18n-temp-status-zh-tw.yml) | add zh-tw (OpenCC s2tw) |
 | [luci-app-adguardhome](https://github.com/stevenjoezhang/luci-app-adguardhome) | ADGH設置界面 |  |  |
